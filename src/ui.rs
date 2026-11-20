@@ -5,9 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Margin, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
@@ -104,6 +104,11 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(BG).fg(FG)), area);
 
+    // Lo que ve el usuario decide la cadencia del bucle (ver `App::frame_timeout`).
+    app.menu_big = menu::fits_big_menu(area);
+    app.header_fits = area.width >= menu::header_width(true);
+
+    // La cabecera mide siempre 1 fila.
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -118,15 +123,20 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     match app.overlay {
         Overlay::None => {}
         Overlay::Menu => menu::render_menu(f, area, app),
+        Overlay::Options => menu::render_options(f, area, app),
         Overlay::Help => menu::render_help(f, area),
+        Overlay::Search => draw_search(app, f, area),
     }
 }
 
 fn draw_header(app: &App, f: &mut Frame, area: Rect) {
     let active = app.tunnels.iter().filter(|t| t.active).count();
     let total = app.tunnels.len();
+    f.render_widget(Block::new().style(Style::new().bg(BG_ALT).fg(FG_DIM)), area);
 
-    let mut left = vec![badge(" wgctui ", ACCENT)];
+    // Una sola línea: el rótulo (animado o la etiqueta fija) y, a su derecha, el túnel elegido.
+    let bar = area;
+    let mut left = menu::header_label(app.header_animation());
     if let Some(t) = app.selected() {
         left.push(sp("  › ", FG_MUTED));
         left.push(sp(t.name.clone(), FG_DIM));
@@ -143,18 +153,17 @@ fn draw_header(app: &App, f: &mut Frame, area: Rect) {
     ];
     let (lw, rw) = (text_width(&left), text_width(&right));
 
-    let line = bar_line(left, right, area.width);
     f.render_widget(
-        Paragraph::new(line).style(Style::new().bg(BG_ALT).fg(FG_DIM)),
-        area,
+        Paragraph::new(bar_line(left, right, bar.width)).style(Style::new().bg(BG_ALT).fg(FG_DIM)),
+        bar,
     );
 
     // Reloj centrado, solo si no toca ninguno de los lados.
     let clock = format!(" {} ", wg::clock());
     let cw = clock.chars().count() as u16;
     let x = area.x + area.width.saturating_sub(cw) / 2;
-    let free_from = area.x + lw as u16 + 1;
-    let free_to = area.x + area.width.saturating_sub(rw as u16);
+    let free_from = bar.x + lw as u16 + 1;
+    let free_to = bar.right().saturating_sub(rw as u16);
     if x >= free_from && x + cw < free_to {
         f.render_widget(
             Paragraph::new(sp(clock, FG_MUTED)).style(Style::new().bg(BG_ALT)),
@@ -183,9 +192,10 @@ fn draw_status(app: &App, f: &mut Frame, area: Rect) {
     }
 
     // Atajos: se quitan de derecha a izquierda si no caben.
-    const HINTS: [(&str, &str); 6] = [
+    const HINTS: [(&str, &str); 7] = [
         ("↑↓", "mover"),
         ("⏎", "alternar"),
+        ("/", "buscar"),
         ("PgUp/PgDn", "detalle"),
         ("r", "refrescar"),
         ("Esc", "menú"),
@@ -527,4 +537,120 @@ fn detail_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         out.push(style_conf_line(l));
     }
     out
+}
+
+// ----------------------------------------------------------- búsqueda
+
+/// Filas de resultados que se ven a la vez (la lista se desplaza).
+const FINDER_ROWS: u16 = 14;
+
+fn popup_block(title: &str) -> Block<'_> {
+    Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(BORDER))
+        .style(Style::new().bg(BG))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
+}
+
+/// Buscador de túneles, con el mismo aspecto que el "Find file" de runetui: línea de
+/// entrada, divisor con el contador y resultados con las letras coincidentes resaltadas.
+fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
+    if area.width < 30 || area.height < 8 {
+        return;
+    }
+    let hits = app.finder.hits(&app.tunnels);
+    let selected = app.finder.selected.min(hits.len().saturating_sub(1));
+    app.finder.selected = selected;
+
+    let width = area.width.saturating_sub(6).clamp(30, 90);
+    let rows = FINDER_ROWS.min(area.height.saturating_sub(6)).max(1);
+    let rect = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(rows + 4) / 2,
+        width,
+        rows + 4,
+    );
+    let inner_width = width.saturating_sub(2) as usize;
+    let offset = selected.saturating_sub(rows as usize - 1);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    // Entrada.
+    let mut input = vec![
+        bold(" > ", ACCENT),
+        bold(app.finder.query.clone(), FG),
+        sp("▏", ACCENT),
+    ];
+    if app.finder.query.is_empty() {
+        input.push(sp(" escribe para buscar un túnel", FG_MUTED));
+    }
+    lines.push(Line::from(input));
+
+    // Divisor con el contador.
+    let status = format!(" {} / {} ", hits.len(), app.tunnels.len());
+    let dashes = inner_width.saturating_sub(status.chars().count() + 1);
+    lines.push(Line::from(vec![
+        sp("─".repeat(dashes), BORDER),
+        sp(status, FG_MUTED),
+        sp("─", BORDER),
+    ]));
+
+    // Resultados.
+    if hits.is_empty() {
+        let text = if app.tunnels.is_empty() {
+            "  no hay túneles"
+        } else {
+            "  sin resultados"
+        };
+        lines.push(Line::from(sp(text, FG_MUTED)));
+    }
+    for (index, hit) in hits.iter().enumerate().skip(offset).take(rows as usize) {
+        let tunnel = &app.tunnels[hit.index];
+        let is_selected = index == selected;
+        let mut spans = vec![
+            sp("▍ ", if is_selected { ACCENT } else { BG }),
+            if tunnel.active {
+                sp("● ", GREEN)
+            } else {
+                sp("○ ", FG_MUTED)
+            },
+        ];
+        spans.extend(name_spans(&tunnel.name, &hit.positions, is_selected));
+        let mut line = Line::from(spans);
+        if is_selected {
+            line = line.style(Style::new().bg(BG_SEL));
+        }
+        lines.push(line);
+    }
+
+    let hint = Line::from(sp(" ↑/↓ mover · Enter ir · Esc cerrar ", FG_MUTED));
+    f.render_widget(Clear, rect);
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(popup_block("Buscar túnel").title_bottom(hint))
+            .style(Style::new().bg(BG).fg(FG)),
+        rect,
+    );
+}
+
+/// El nombre con las letras que coincidieron con la búsqueda resaltadas.
+fn name_spans(name: &str, positions: &[usize], selected: bool) -> Vec<Span<'static>> {
+    name.chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = if positions.contains(&i) {
+                Style::new()
+                    .fg(YELLOW)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            } else if selected {
+                Style::new().fg(FG).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(FG)
+            };
+            Span::styled(c.to_string(), style)
+        })
+        .collect()
 }
