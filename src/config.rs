@@ -6,19 +6,50 @@
 //! Formato (una clave por línea, `#` para comentarios):
 //!
 //! ```text
+//! update_ms = 1000
+//! show_stars = on
 //! header_animation = on
 //! banner_animation = on
 //! menu_animation = on
 //! ```
 //!
+//! `update_ms` es la frecuencia de actualización (como en btop): cada cuánto se leen los
+//! datos de WireGuard. Por defecto 1000 ms; de 100 a 20000.
+//!
+//! `show_stars` muestra u oculta el contador de estrellas de GitHub de la cabecera (y con
+//! `off` wgctui no hace ninguna petición de red).
+//!
 //! El parseo es tolerante: claves en mayúsculas o con espacios, líneas rotas o claves
-//! desconocidas se ignoran y lo que falte queda en su valor por defecto (todo activado).
+//! desconocidas se ignoran y lo que falte queda en su valor por defecto (todo activado,
+//! 1000 ms). Un `update_ms` fuera de rango se ajusta al límite más cercano.
 //! La clave antigua `animations` (un único interruptor) sigue entendiéndose: fija los tres
 //! ajustes a la vez, y las claves nuevas que vengan después la sobrescriben.
 
 use std::{fs, io, path::Path};
 
 pub const CONFIG_PATH: &str = "/etc/wgctui.conf";
+
+/// Frecuencia de actualización por defecto, mínima y máxima (milisegundos).
+pub const DEFAULT_UPDATE_MS: u32 = 1000;
+pub const MIN_UPDATE_MS: u32 = 100;
+pub const MAX_UPDATE_MS: u32 = 20_000;
+/// Hasta `UPDATE_FINE_UNTIL` (incluido) se sube y baja de 100 en 100 ms; por encima, de 500 en 500.
+const UPDATE_FINE_UNTIL: u32 = 1000;
+const UPDATE_FINE_STEP: u32 = 100;
+const UPDATE_COARSE_STEP: u32 = 500;
+
+/// Siguiente valor de la frecuencia al subirla (más lenta): nunca pasa de `MAX_UPDATE_MS`.
+/// También sirve si el archivo trae un valor que no cae en la rejilla (p. ej. 1234 → 1500).
+pub fn update_ms_up(ms: u32) -> u32 {
+    let step = if ms < UPDATE_FINE_UNTIL { UPDATE_FINE_STEP } else { UPDATE_COARSE_STEP };
+    ((ms / step + 1) * step).clamp(MIN_UPDATE_MS, MAX_UPDATE_MS)
+}
+
+/// Siguiente valor al bajarla (más rápida): nunca baja de `MIN_UPDATE_MS`.
+pub fn update_ms_down(ms: u32) -> u32 {
+    let step = if ms <= UPDATE_FINE_UNTIL { UPDATE_FINE_STEP } else { UPDATE_COARSE_STEP };
+    (ms.saturating_sub(1) / step * step).clamp(MIN_UPDATE_MS, MAX_UPDATE_MS)
+}
 
 /// Cada una de las animaciones que se pueden activar o desactivar por separado.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +78,10 @@ impl Setting {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
+    /// Frecuencia de actualización de los datos, en milisegundos (100..=20000).
+    pub update_ms: u32,
+    /// Contador de estrellas de GitHub arriba a la derecha de la cabecera.
+    pub show_stars: bool,
     pub header_animation: bool,
     pub banner_animation: bool,
     pub menu_animation: bool,
@@ -55,6 +90,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            update_ms: DEFAULT_UPDATE_MS,
+            show_stars: true,
             header_animation: true,
             banner_animation: true,
             menu_animation: true,
@@ -72,6 +109,17 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 impl Config {
+    /// Frecuencia de actualización como `Duration`.
+    pub fn update_every(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(u64::from(self.update_ms))
+    }
+
+    /// Sube (`up`) o baja la frecuencia de actualización un paso y devuelve el nuevo valor.
+    pub fn step_update(&mut self, up: bool) -> u32 {
+        self.update_ms = if up { update_ms_up(self.update_ms) } else { update_ms_down(self.update_ms) };
+        self.update_ms
+    }
+
     pub fn get(&self, setting: Setting) -> bool {
         match setting {
             Setting::Header => self.header_animation,
@@ -116,11 +164,21 @@ impl Config {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
             };
+            let key = key.trim().to_lowercase();
+            if key == "update_ms" {
+                // Número con o sin "ms"; si no se entiende, se queda lo que hubiera.
+                let digits = value.trim().trim_end_matches("ms").trim();
+                if let Ok(ms) = digits.parse::<i64>() {
+                    config.update_ms = ms.clamp(i64::from(MIN_UPDATE_MS), i64::from(MAX_UPDATE_MS)) as u32;
+                }
+                continue;
+            }
             let Some(value) = parse_bool(value) else {
                 continue; // valor que no se entiende: se queda lo que hubiera
             };
-            let key = key.trim().to_lowercase();
-            if key == "animations" {
+            if key == "show_stars" {
+                config.show_stars = value;
+            } else if key == "animations" {
                 // Clave antigua: un solo interruptor para todo.
                 for setting in Setting::ALL {
                     config.set(setting, value);
@@ -142,6 +200,8 @@ impl Config {
 
     fn render(&self) -> String {
         let mut text = String::from("# wgctui\n");
+        text.push_str(&format!("update_ms = {}\n", self.update_ms));
+        text.push_str(&format!("show_stars = {}\n", if self.show_stars { "on" } else { "off" }));
         for setting in Setting::ALL {
             let value = if self.get(setting) { "on" } else { "off" };
             text.push_str(&format!("{} = {value}\n", setting.key()));
@@ -155,6 +215,8 @@ mod tests {
     use super::*;
 
     const ALL_ON: Config = Config {
+        update_ms: 1000,
+        show_stars: true,
         header_animation: true,
         banner_animation: true,
         menu_animation: true,
@@ -211,6 +273,110 @@ mod tests {
     }
 
     #[test]
+    fn update_rate_defaults_to_one_second() {
+        assert_eq!(Config::default().update_ms, 1000);
+        assert_eq!(Config::parse("").update_ms, 1000);
+        assert_eq!(Config::default().update_every(), std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn update_rate_is_read_and_clamped_to_the_range() {
+        assert_eq!(Config::parse("update_ms = 250\n").update_ms, 250);
+        assert_eq!(Config::parse("  UPDATE_MS=5000 ms ").update_ms, 5000);
+        assert_eq!(Config::parse("update_ms = 100\n").update_ms, 100);
+        assert_eq!(Config::parse("update_ms = 20000\n").update_ms, 20_000);
+        // Fuera de rango: al límite más cercano.
+        assert_eq!(Config::parse("update_ms = 5\n").update_ms, 100);
+        assert_eq!(Config::parse("update_ms = 0\n").update_ms, 100);
+        assert_eq!(Config::parse("update_ms = -50\n").update_ms, 100);
+        assert_eq!(Config::parse("update_ms = 999999999\n").update_ms, 20_000);
+        // Basura: se ignora y queda lo que hubiera.
+        assert_eq!(Config::parse("update_ms = rápido\n").update_ms, 1000);
+        assert_eq!(Config::parse("update_ms = 300\nupdate_ms = ???\n").update_ms, 300);
+        assert_eq!(Config::parse("update_ms = 1.5\n").update_ms, 1000);
+    }
+
+    #[test]
+    fn update_rate_does_not_disturb_the_animation_switches() {
+        let c = Config::parse("update_ms = 2000\nbanner_animation = off\n");
+        assert_eq!(c.update_ms, 2000);
+        assert_eq!((c.header_animation, c.banner_animation, c.menu_animation), (true, false, true));
+        // La clave antigua no toca la frecuencia.
+        assert_eq!(Config::parse("update_ms = 300\nanimations = off\n").update_ms, 300);
+    }
+
+    #[test]
+    fn stepping_goes_by_100_up_to_a_second_and_by_500_after() {
+        assert_eq!(update_ms_up(100), 200);
+        assert_eq!(update_ms_up(900), 1000);
+        assert_eq!(update_ms_up(1000), 1500);
+        assert_eq!(update_ms_up(1500), 2000);
+        assert_eq!(update_ms_up(19_500), 20_000);
+        assert_eq!(update_ms_down(20_000), 19_500);
+        assert_eq!(update_ms_down(1500), 1000);
+        assert_eq!(update_ms_down(1000), 900);
+        assert_eq!(update_ms_down(200), 100);
+    }
+
+    #[test]
+    fn stepping_stops_at_the_limits() {
+        assert_eq!(update_ms_up(20_000), 20_000);
+        assert_eq!(update_ms_down(100), 100);
+        let mut c = Config { update_ms: 100, ..Config::default() };
+        assert_eq!(c.step_update(false), 100);
+        c.update_ms = 20_000;
+        assert_eq!(c.step_update(true), 20_000);
+    }
+
+    #[test]
+    fn stepping_handles_values_off_the_grid() {
+        assert_eq!(update_ms_up(1234), 1500);
+        assert_eq!(update_ms_down(1234), 1000);
+        assert_eq!(update_ms_up(150), 200);
+        assert_eq!(update_ms_down(150), 100);
+        assert_eq!(update_ms_up(950), 1000);
+    }
+
+    #[test]
+    fn every_step_from_the_bottom_reaches_the_top_and_back() {
+        let mut ms = MIN_UPDATE_MS;
+        let mut steps = 0;
+        while ms < MAX_UPDATE_MS {
+            let next = update_ms_up(ms);
+            assert!(next > ms);
+            assert_eq!(update_ms_down(next), ms, "subir y bajar deben ser inversos ({ms})");
+            ms = next;
+            steps += 1;
+        }
+        assert_eq!(steps, 9 + 38); // 100→1000 en 9 pasos y 1000→20000 en 38
+    }
+
+    #[test]
+    fn stars_are_shown_by_default_and_can_be_hidden() {
+        assert!(Config::default().show_stars);
+        assert!(Config::parse("").show_stars);
+        assert!(Config::parse("show_stars = on\n").show_stars);
+        assert!(!Config::parse("show_stars = off\n").show_stars);
+        assert!(!Config::parse("  SHOW_STARS=False ").show_stars);
+        assert!(!Config::parse("show_stars = 0\n").show_stars);
+        // Valor raro: se queda lo que hubiera.
+        assert!(Config::parse("show_stars = quizá\n").show_stars);
+        assert!(!Config::parse("show_stars = off\nshow_stars = ???\n").show_stars);
+    }
+
+    #[test]
+    fn stars_do_not_mix_with_the_animation_switches_or_the_interval() {
+        let c = Config::parse("show_stars = off\n");
+        assert_eq!((c.header_animation, c.banner_animation, c.menu_animation), (true, true, true));
+        assert_eq!(c.update_ms, 1000);
+        // La clave antigua de las animaciones no toca las estrellas.
+        assert!(Config::parse("animations = off\n").show_stars);
+        assert!(!Config::parse("show_stars = off\nanimations = on\n").show_stars);
+        let c = Config::parse("header_animation = off\nupdate_ms = 400\n");
+        assert!(c.show_stars);
+    }
+
+    #[test]
     fn toggle_flips_only_one_setting() {
         let mut c = Config::default();
         assert!(!c.toggle(Setting::Banner));
@@ -225,6 +391,8 @@ mod tests {
     #[test]
     fn rendered_file_has_the_three_keys_and_round_trips() {
         let text = ALL_ON.render();
+        assert!(text.contains("update_ms = 1000\n"));
+        assert!(text.contains("show_stars = on\n"));
         assert!(text.contains("header_animation = on\n"));
         assert!(text.contains("banner_animation = on\n"));
         assert!(text.contains("menu_animation = on\n"));
@@ -232,7 +400,11 @@ mod tests {
         let mut c = Config::default();
         c.set(Setting::Header, false);
         c.set(Setting::Menu, false);
+        c.update_ms = 350;
+        c.show_stars = false;
         let text = c.render();
+        assert!(text.contains("update_ms = 350\n"));
+        assert!(text.contains("show_stars = off\n"));
         assert!(text.contains("header_animation = off\n"));
         assert!(text.contains("banner_animation = on\n"));
         assert!(text.contains("menu_animation = off\n"));
@@ -244,6 +416,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("wgctui-test-{}.conf", std::process::id()));
         let mut c = Config::default();
         c.set(Setting::Banner, false);
+        c.update_ms = 4500;
         c.save_to(&path).unwrap();
         assert_eq!(Config::load_from(&path), c);
         let _ = fs::remove_file(&path);

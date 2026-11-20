@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::{
-    App, Kind, Overlay, menu,
+    App, Kind, Overlay, menu, stars,
     theme::*,
     wg::{self, Tunnel, WG_DIR},
 };
@@ -116,7 +116,8 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     ])
     .split(area);
 
-    draw_header(app, f, rows[0]);
+    let keep = draw_header(app, f, rows[0]);
+    app.header_keep = keep;
     draw_body(app, f, rows[1]);
     draw_status(app, f, rows[2]);
 
@@ -124,12 +125,14 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         Overlay::None => {}
         Overlay::Menu => menu::render_menu(f, area, app),
         Overlay::Options => menu::render_options(f, area, app),
-        Overlay::Help => menu::render_help(f, area),
+        Overlay::Help => menu::render_help(f, area, app),
         Overlay::Search => draw_search(app, f, area),
     }
 }
 
-fn draw_header(app: &App, f: &mut Frame, area: Rect) {
+/// Dibuja la cabecera y devuelve dónde quedó su grupo de la derecha (contador de túneles y
+/// estrellas), que el menú de Esc deja sin oscurecer; `None` si no cupo.
+fn draw_header(app: &App, f: &mut Frame, area: Rect) -> Option<Rect> {
     let active = app.tunnels.iter().filter(|t| t.active).count();
     let total = app.tunnels.len();
     f.render_widget(Block::new().style(Style::new().bg(BG_ALT).fg(FG_DIM)), area);
@@ -141,17 +144,37 @@ fn draw_header(app: &App, f: &mut Frame, area: Rect) {
         left.push(sp("  › ", FG_MUTED));
         left.push(sp(t.name.clone(), FG_DIM));
     }
-    let right = vec![
+    let count = Span::styled(
+        format!(" {active}/{total} activos "),
+        Style::new()
+            .fg(if active > 0 { GREEN } else { FG_MUTED })
+            .bg(BG_SEL)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    );
+    // Contador de túneles y, en el extremo derecho, las estrellas de GitHub (con un hueco de
+    // margen detrás). Si no caben, las estrellas son lo primero que se quita.
+    let stars = stars::label(app.stars.state()).map(|label| {
         Span::styled(
-            format!(" {active}/{total} activos "),
-            Style::new()
-                .fg(if active > 0 { GREEN } else { FG_MUTED })
-                .bg(BG_SEL)
-                .add_modifier(ratatui::style::Modifier::BOLD),
-        ),
-        Span::raw(" "),
-    ];
-    let (lw, rw) = (text_width(&left), text_width(&right));
+            format!("  {label}"),
+            Style::new().fg(STAR).add_modifier(ratatui::style::Modifier::BOLD),
+        )
+    });
+    let build_right = |with_stars: bool| {
+        let mut right = vec![count.clone()];
+        if let (true, Some(stars)) = (with_stars, &stars) {
+            right.push(stars.clone());
+        }
+        right.push(Span::raw(" "));
+        right
+    };
+    let lw = text_width(&left);
+    let mut right = build_right(true);
+    if lw + text_width(&right) >= bar.width as usize {
+        right = build_right(false);
+    }
+    let rw = text_width(&right);
+    let keep = (lw + rw < bar.width as usize)
+        .then(|| Rect::new(bar.right() - rw as u16, bar.y, rw as u16, 1));
 
     f.render_widget(
         Paragraph::new(bar_line(left, right, bar.width)).style(Style::new().bg(BG_ALT).fg(FG_DIM)),
@@ -170,6 +193,7 @@ fn draw_header(app: &App, f: &mut Frame, area: Rect) {
             Rect::new(x, area.y, cw, 1),
         );
     }
+    keep
 }
 
 fn draw_status(app: &App, f: &mut Frame, area: Rect) {

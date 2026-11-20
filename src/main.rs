@@ -3,6 +3,7 @@
 mod config;
 mod finder;
 mod menu;
+mod stars;
 mod theme;
 mod ui;
 mod wg;
@@ -23,9 +24,11 @@ use ratatui::{
 
 use config::{Config, Setting};
 use finder::Finder;
+use stars::Stars;
 use wg::{Msg, Tunnel, WG_DIR};
 
-const REFRESH_EVERY: Duration = Duration::from_secs(1);
+/// Si una lectura de datos tarda más que esto, se da por perdida y se permite pedir otra.
+const REFRESH_STUCK: Duration = Duration::from_secs(5);
 /// Muestras de velocidad que se guardan para la gráfica (una por refresco).
 const HISTORY: usize = 60;
 
@@ -41,6 +44,55 @@ const IDLE_TICK: Duration = Duration::from_millis(100);
 
 /// Entradas del menú de Esc, en orden (la primera es la seleccionada al abrirlo).
 pub const MENU_ITEMS: [&str; 3] = ["OPTIONS", "HELP", "QUIT"];
+
+/// Ajustes de la pantalla OPTIONS, agrupados en pestañas como en runetui.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionItem {
+    /// Frecuencia de actualización de los datos (como `update_ms` de btop).
+    UpdateInterval,
+    /// Contador de estrellas de GitHub en la cabecera (y única petición de red).
+    GithubStars,
+    HeaderAnimation,
+    BannerAnimation,
+    MenuAnimation,
+}
+
+impl OptionItem {
+    /// Se cambia con Enter y después con `+` / `-` (o directamente con `+` / `-`).
+    pub fn is_adjustable(self) -> bool {
+        matches!(self, OptionItem::UpdateInterval)
+    }
+
+    /// El interruptor de animación que gobierna, si es uno de ellos.
+    pub fn setting(self) -> Option<Setting> {
+        match self {
+            OptionItem::HeaderAnimation => Some(Setting::Header),
+            OptionItem::BannerAnimation => Some(Setting::Banner),
+            OptionItem::MenuAnimation => Some(Setting::Menu),
+            OptionItem::UpdateInterval | OptionItem::GithubStars => None,
+        }
+    }
+}
+
+pub struct OptionTab {
+    pub name: &'static str,
+    pub items: &'static [OptionItem],
+}
+
+pub const OPTION_TABS: [OptionTab; 2] = [
+    OptionTab {
+        name: "General",
+        items: &[OptionItem::UpdateInterval, OptionItem::GithubStars],
+    },
+    OptionTab {
+        name: "Animaciones",
+        items: &[
+            OptionItem::HeaderAnimation,
+            OptionItem::BannerAnimation,
+            OptionItem::MenuAnimation,
+        ],
+    },
+];
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
@@ -76,8 +128,15 @@ pub struct App {
     pub config: Config,
     /// Dónde se guardan los ajustes (en los tests, un archivo temporal).
     config_path: PathBuf,
-    /// Interruptor seleccionado en la pantalla OPTIONS.
+    /// Pestaña y ajuste seleccionados en la pantalla OPTIONS.
+    pub options_tab: usize,
     pub options_selected: usize,
+    /// Estrellas de GitHub del repositorio (se piden en segundo plano; `Off` si están ocultas).
+    pub stars: Stars,
+    /// Esquina derecha de la cabecera, que el menú no oscurece (la última dibujada).
+    pub header_keep: Option<ratatui::layout::Rect>,
+    /// Se pulsó Enter en un ajuste numérico: `+` / `-` lo cambian hasta Enter o Esc.
+    pub adjusting: bool,
     /// Cuándo arrancó el texto animado de la cabecera (el barrido vuelve a salir al reactivar).
     header_start: Instant,
     /// Lo que la última pantalla dibujada dejó ver: el menú grande (con banner) y el
@@ -89,6 +148,8 @@ pub struct App {
     rx: Receiver<Msg>,
     /// Id de la última instantánea pedida: sirve para descartar respuestas viejas.
     refresh_id: u64,
+    /// Desde cuándo espera la última lectura (None = ya llegó).
+    refresh_since: Option<Instant>,
     last_refresh: Instant,
     quit: bool,
 }
@@ -120,7 +181,11 @@ impl App {
             start: Instant::now(),
             config,
             config_path: PathBuf::from(config::CONFIG_PATH),
+            options_tab: 0,
             options_selected: 0,
+            adjusting: false,
+            stars: Stars::start(config.show_stars),
+            header_keep: None,
             header_start: Instant::now(),
             menu_big: false,
             header_fits: true,
@@ -128,6 +193,7 @@ impl App {
             tx,
             rx,
             refresh_id: 0,
+            refresh_since: None,
             last_refresh: Instant::now(),
             quit: false,
         }
@@ -227,6 +293,17 @@ impl App {
         self.refresh_id += 1;
         wg::spawn_refresh(self.refresh_id, self.tx.clone());
         self.last_refresh = Instant::now();
+        self.refresh_since = Some(self.last_refresh);
+    }
+
+    /// ¿Hay una lectura en marcha? Con frecuencias de 100 ms no se apilan hilos si una tarda.
+    fn refresh_in_flight(&self) -> bool {
+        self.refresh_since.is_some_and(|t| t.elapsed() < REFRESH_STUCK)
+    }
+
+    /// ¿Toca la lectura periódica según la frecuencia de actualización elegida?
+    fn refresh_due(&self) -> bool {
+        self.last_refresh.elapsed() >= self.config.update_every() && !self.refresh_in_flight()
     }
 
     /// Coloca una instantánea ya cargada, conservando selección y operaciones en curso.
@@ -264,6 +341,9 @@ impl App {
     /// Velocidad de bajada/subida comparando contadores entre instantáneas, más el
     /// historial que alimenta la gráfica. `now` es cuando se tomaron los contadores.
     fn update_rates(&mut self, now: Instant) {
+        // Ventana mínima entre dos muestras: 0,5 s como siempre, o la mitad de la frecuencia
+        // elegida si es más corta (así 100 ms sigue dando velocidades y gráfica).
+        let min_dt = (self.config.update_every().as_secs_f64() * 0.5).min(0.5);
         let mut alive: Vec<String> = Vec::new();
         for t in &self.tunnels {
             if !t.active {
@@ -274,7 +354,7 @@ impl App {
             match self.samples.get(&t.name).copied() {
                 Some((prx, ptx, pt)) => {
                     let dt = now.duration_since(pt).as_secs_f64();
-                    if dt >= 0.5 {
+                    if dt >= min_dt {
                         let rate = (
                             rx.saturating_sub(prx) as f64 / dt,
                             tx.saturating_sub(ptx) as f64 / dt,
@@ -351,6 +431,7 @@ impl App {
                 if id != self.refresh_id {
                     return;
                 }
+                self.refresh_since = None;
                 match result {
                     Ok(snap) => self.apply_snapshot(snap),
                     Err(e) => self.set_status(format!("No puedo leer {WG_DIR}: {e}"), Kind::Err),
@@ -400,7 +481,9 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => match self.menu_selected {
                 0 => {
                     self.overlay = Overlay::Options;
+                    self.options_tab = 0;
                     self.options_selected = 0;
+                    self.adjusting = false;
                 }
                 1 => self.overlay = Overlay::Help,
                 _ => self.quit = true,
@@ -409,34 +492,92 @@ impl App {
         }
     }
 
-    /// Opciones: un interruptor por animación. Esc vuelve al menú sin repetir su animación.
+    /// Opciones, como en runetui: pestañas arriba, ajustes a la izquierda y la descripción del
+    /// elegido a la derecha. `↑↓` mueven, `←→` o Tab cambian de pestaña, Enter o Espacio cambian
+    /// el ajuste (en los numéricos, `+` / `-` hasta Enter o Esc). Esc vuelve al menú sin repetir
+    /// su animación.
     fn options_key(&mut self, code: KeyCode) {
-        let n = Setting::ALL.len();
+        if self.adjusting {
+            match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.adjusting = false,
+                KeyCode::Char('+' | '=') | KeyCode::Right | KeyCode::Up => self.adjust_update(true),
+                KeyCode::Char('-' | '_') | KeyCode::Left | KeyCode::Down => self.adjust_update(false),
+                _ => {}
+            }
+            return;
+        }
+        let tabs = OPTION_TABS.len();
+        let items = OPTION_TABS[self.options_tab].items.len();
         match code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.overlay = Overlay::Menu;
                 self.menu_opened = None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.options_selected = (self.options_selected + n - 1) % n
+                self.options_selected = (self.options_selected + items - 1) % items
             }
-            KeyCode::Down | KeyCode::Char('j') => self.options_selected = (self.options_selected + 1) % n,
-            KeyCode::Enter
-            | KeyCode::Char(' ')
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Char('h' | 'l') => self.toggle_setting(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.options_selected = (self.options_selected + 1) % items
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                self.options_tab = (self.options_tab + tabs - 1) % tabs;
+                self.options_selected = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                self.options_tab = (self.options_tab + 1) % tabs;
+                self.options_selected = 0;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_option(self.current_option()),
+            // Como en btop, `+` / `-` también cambian la frecuencia sin pasar por Enter.
+            KeyCode::Char('+' | '=') if self.current_option().is_adjustable() => {
+                self.adjust_update(true)
+            }
+            KeyCode::Char('-' | '_') if self.current_option().is_adjustable() => {
+                self.adjust_update(false)
+            }
             _ => {}
         }
     }
 
-    /// Cambia el interruptor seleccionado y guarda los tres ajustes.
-    fn toggle_setting(&mut self) {
-        let setting = Setting::ALL[self.options_selected.min(Setting::ALL.len() - 1)];
+    /// El ajuste seleccionado ahora mismo en la pantalla OPTIONS.
+    pub fn current_option(&self) -> OptionItem {
+        let items = OPTION_TABS[self.options_tab.min(OPTION_TABS.len() - 1)].items;
+        items[self.options_selected.min(items.len() - 1)]
+    }
+
+    fn activate_option(&mut self, item: OptionItem) {
+        match (item, item.setting()) {
+            (_, Some(setting)) => self.toggle_setting(setting),
+            (OptionItem::GithubStars, None) => self.toggle_stars(),
+            (_, None) => self.adjusting = true,
+        }
+    }
+
+    /// Muestra u oculta las estrellas. Al ocultarlas no se hace ninguna petición de red.
+    fn toggle_stars(&mut self) {
+        self.config.show_stars = !self.config.show_stars;
+        self.stars.set_enabled(self.config.show_stars);
+        self.save_config();
+    }
+
+    /// Cambia un interruptor de animación y guarda los ajustes.
+    fn toggle_setting(&mut self, setting: Setting) {
         let on = self.config.toggle(setting);
         if setting == Setting::Header && on {
             self.header_start = Instant::now(); // el texto vuelve a empezar por el barrido
         }
+        self.save_config();
+    }
+
+    /// Sube (más lenta) o baja (más rápida) la frecuencia de actualización un paso y guarda.
+    fn adjust_update(&mut self, up: bool) {
+        let before = self.config.update_ms;
+        if self.config.step_update(up) != before {
+            self.save_config();
+        }
+    }
+
+    fn save_config(&mut self) {
         if let Err(e) = self.config.save_to(&self.config_path) {
             self.set_status(
                 format!("No pude guardar {}: {e}", self.config_path.display()),
@@ -532,7 +673,8 @@ impl App {
             while let Ok(msg) = self.rx.try_recv() {
                 self.on_msg(msg);
             }
-            if self.last_refresh.elapsed() >= REFRESH_EVERY {
+            self.stars.poll();
+            if self.refresh_due() {
                 self.refresh();
             }
         }
@@ -559,6 +701,7 @@ mod tests {
             header_animation: false,
             banner_animation: false,
             menu_animation: false,
+            ..Config::default()
         }
     }
 
@@ -626,78 +769,268 @@ mod tests {
         assert_eq!(MENU_ITEMS[app.menu_selected], "OPTIONS");
     }
 
-    #[test]
-    fn options_keys_move_and_toggle_one_switch_at_a_time() {
-        let mut app = app_with(Config::default(), "options-keys");
-        press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Enter);
-        assert_eq!(app.options_selected, 0);
+    /// Abre OPTIONS desde el menú de Esc.
+    fn open_options(app: &mut App) {
+        press(app, KeyCode::Esc);
+        press(app, KeyCode::Enter);
+        assert!(app.overlay == Overlay::Options);
+    }
 
-        // Header: Enter.
-        press(&mut app, KeyCode::Enter);
-        assert_eq!(
-            (app.config.header_animation, app.config.banner_animation, app.config.menu_animation),
-            (false, true, true)
-        );
-        // Banner: ↓ y Espacio.
-        press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Char(' '));
-        assert_eq!(
-            (app.config.header_animation, app.config.banner_animation, app.config.menu_animation),
-            (false, false, true)
-        );
-        // Menu: ↓ y ←, luego → lo vuelve a activar.
-        press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Left);
-        assert!(!app.config.menu_animation);
-        press(&mut app, KeyCode::Right);
-        assert!(app.config.menu_animation);
-        // ↑ sube y ↓ da la vuelta.
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.options_selected, 0);
-        press(&mut app, KeyCode::Up);
-        assert_eq!(app.options_selected, 2);
+    fn switches(app: &App) -> (bool, bool, bool) {
+        (
+            app.config.header_animation,
+            app.config.banner_animation,
+            app.config.menu_animation,
+        )
+    }
+
+    fn cleanup(app: &App) {
         let _ = std::fs::remove_file(&app.config_path);
     }
 
     #[test]
-    fn options_start_on_the_first_switch_each_time() {
-        let mut app = app_with(Config::default(), "options-first");
-        press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Down);
-        assert_eq!(app.options_selected, 1);
-        press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Enter);
-        assert_eq!(app.options_selected, 0);
+    fn options_has_a_general_tab_and_an_animations_tab() {
+        assert_eq!(OPTION_TABS.len(), 2);
+        assert_eq!(OPTION_TABS[0].name, "General");
+        assert_eq!(
+            OPTION_TABS[0].items,
+            &[OptionItem::UpdateInterval, OptionItem::GithubStars]
+        );
+        assert_eq!(OPTION_TABS[1].name, "Animaciones");
+        assert_eq!(
+            OPTION_TABS[1].items,
+            &[
+                OptionItem::HeaderAnimation,
+                OptionItem::BannerAnimation,
+                OptionItem::MenuAnimation
+            ]
+        );
+        assert!(OptionItem::UpdateInterval.is_adjustable());
+        assert!(!OptionItem::BannerAnimation.is_adjustable());
     }
 
     #[test]
-    fn toggling_saves_all_three_settings() {
-        let mut app = app_with(Config::default(), "persist");
+    fn options_open_on_the_first_item_of_the_first_tab() {
+        let mut app = app_with(Config::default(), "options-open");
+        open_options(&mut app);
+        assert_eq!((app.options_tab, app.options_selected), (0, 0));
+        assert_eq!(app.current_option(), OptionItem::UpdateInterval);
+        assert!(!app.adjusting);
+    }
+
+    #[test]
+    fn left_right_and_tab_switch_tabs_and_wrap() {
+        let mut app = app_with(Config::default(), "options-tabs");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.options_tab, 1);
+        assert_eq!(app.current_option(), OptionItem::HeaderAnimation);
+        press(&mut app, KeyCode::Right); // da la vuelta
+        assert_eq!(app.options_tab, 0);
+        press(&mut app, KeyCode::Left); // y hacia atrás
+        assert_eq!(app.options_tab, 1);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.options_tab, 0);
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.options_tab, 1);
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.options_tab, 0);
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.options_tab, 1);
+        // Cambiar de pestaña vuelve al primer ajuste y no cambia ningún interruptor.
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Left);
+        assert_eq!((app.options_tab, app.options_selected), (0, 0));
+        assert_eq!(switches(&app), (true, true, true));
+    }
+
+    #[test]
+    fn up_down_move_within_the_tab_and_wrap() {
+        let mut app = app_with(Config::default(), "options-updown");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Down); // General: intervalo y estrellas
+        assert_eq!(app.current_option(), OptionItem::GithubStars);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.current_option(), OptionItem::UpdateInterval);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.current_option(), OptionItem::GithubStars);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.options_selected, 0);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.current_option(), OptionItem::BannerAnimation);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.current_option(), OptionItem::MenuAnimation);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.current_option(), OptionItem::HeaderAnimation);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.current_option(), OptionItem::MenuAnimation);
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.current_option(), OptionItem::BannerAnimation);
+    }
+
+    #[test]
+    fn animations_tab_toggles_one_switch_at_a_time() {
+        let mut app = app_with(Config::default(), "options-toggle");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Enter); // Header
+        assert_eq!(switches(&app), (false, true, true));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char(' ')); // Banner
+        assert_eq!(switches(&app), (false, false, true));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // Menu
+        assert_eq!(switches(&app), (false, false, false));
+        press(&mut app, KeyCode::Enter); // otra vez: se reactiva
+        assert_eq!(switches(&app), (false, false, true));
+        // La frecuencia no se toca al cambiar animaciones.
+        assert_eq!(app.config.update_ms, 1000);
+        cleanup(&app);
+    }
+
+    #[test]
+    fn esc_in_options_goes_back_to_the_menu_and_reopening_starts_over() {
+        let mut app = app_with(Config::default(), "options-esc");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Esc);
+        assert!(app.overlay == Overlay::Menu);
         press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Down); // Banner
+        assert_eq!((app.options_tab, app.options_selected), (0, 0));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(app.overlay == Overlay::Menu);
+    }
+
+    #[test]
+    fn enter_on_the_update_interval_starts_adjusting() {
+        let mut app = app_with(Config::default(), "adjust-enter");
+        open_options(&mut app);
         press(&mut app, KeyCode::Enter);
+        assert!(app.adjusting);
+        assert_eq!(app.config.update_ms, 1000); // solo entra en modo ajuste
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.adjusting);
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.adjusting);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.adjusting);
+        assert!(app.overlay == Overlay::Options, "Esc solo termina el ajuste");
+    }
+
+    #[test]
+    fn plus_and_minus_change_the_update_interval_while_adjusting() {
+        let mut app = app_with(Config::default(), "adjust-keys");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.config.update_ms, 1500);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.config.update_ms, 2000);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char('='));
+        assert_eq!(app.config.update_ms, 3000);
+        press(&mut app, KeyCode::Char('-'));
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('_'));
+        assert_eq!(app.config.update_ms, 1000);
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!(app.config.update_ms, 900);
+        assert!(app.adjusting, "sigue ajustando hasta Enter o Esc");
+        cleanup(&app);
+    }
+
+    #[test]
+    fn plus_and_minus_work_without_pressing_enter_first_like_btop() {
+        let mut app = app_with(Config::default(), "adjust-direct");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.config.update_ms, 1500);
+        press(&mut app, KeyCode::Char('-'));
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!(app.config.update_ms, 900);
+        assert!(!app.adjusting);
+        // En una animación, + y - no hacen nada.
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Char('+'));
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!((app.config.update_ms, switches(&app)), (900, (true, true, true)));
+        cleanup(&app);
+    }
+
+    #[test]
+    fn the_update_interval_stays_between_100_and_20000() {
+        let mut app = app_with(Config::default(), "adjust-limits");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Enter);
+        for _ in 0..30 {
+            press(&mut app, KeyCode::Char('-'));
+        }
+        assert_eq!(app.config.update_ms, 100);
+        for _ in 0..80 {
+            press(&mut app, KeyCode::Char('+'));
+        }
+        assert_eq!(app.config.update_ms, 20_000);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.config.update_ms, 20_000);
+        cleanup(&app);
+    }
+
+    #[test]
+    fn while_adjusting_the_navigation_keys_do_not_leave_the_setting() {
+        let mut app = app_with(Config::default(), "adjust-locked");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!((app.options_tab, app.options_selected), (0, 0));
+        assert!(app.adjusting);
+        cleanup(&app);
+    }
+
+    #[test]
+    fn changes_are_saved_right_away_with_all_four_settings() {
+        let mut app = app_with(Config::default(), "persist");
+        open_options(&mut app);
+        press(&mut app, KeyCode::Char('-')); // 900 ms
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter); // Banner off
         let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.contains("update_ms = 900"));
         assert!(text.contains("header_animation = on"));
         assert!(text.contains("banner_animation = off"));
         assert!(text.contains("menu_animation = on"));
         assert_eq!(
             Config::load_from(&app.config_path),
-            Config { banner_animation: false, ..Config::default() }
+            Config { update_ms: 900, banner_animation: false, ..Config::default() }
         );
-        let _ = std::fs::remove_file(&app.config_path);
+        cleanup(&app);
     }
 
     #[test]
-    fn a_failed_save_is_reported_but_the_switch_still_changes() {
+    fn a_failed_save_is_reported_but_the_setting_still_changes() {
         let mut app = app_with(Config::default(), "save-fail");
         app.config_path = PathBuf::from("/no/existe/wgctui.conf");
         app.overlay = Overlay::Options;
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.config.update_ms, 1500);
+        assert!(matches!(app.visible_status(), Some((_, Kind::Err))));
+        app.status.clear();
+        press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Enter);
         assert!(!app.config.header_animation);
         assert!(matches!(app.visible_status(), Some((_, Kind::Err))));
+    }
+
+    #[test]
+    fn a_step_that_changes_nothing_does_not_write_the_file() {
+        let mut app = app_with(Config { update_ms: 100, ..Config::default() }, "no-write");
+        app.overlay = Overlay::Options;
+        press(&mut app, KeyCode::Char('-'));
+        assert!(!app.config_path.exists());
     }
 
     #[test]
@@ -705,12 +1038,206 @@ mod tests {
         let mut app = app_with(Config::default(), "header-restart");
         app.header_start = ago(30);
         assert!(!app.header_animation().is_some_and(menu::header_sweeping));
-        app.overlay = Overlay::Options;
+        open_options(&mut app);
+        press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Enter); // off
         assert!(app.header_animation().is_none());
         press(&mut app, KeyCode::Enter); // on
         assert!(app.header_animation().is_some_and(menu::header_sweeping));
-        let _ = std::fs::remove_file(&app.config_path);
+        cleanup(&app);
+    }
+
+    // ------------------------------------------------------------- estrellas
+
+    fn select_stars(app: &mut App) {
+        open_options(app);
+        press(app, KeyCode::Down);
+        assert_eq!(app.current_option(), OptionItem::GithubStars);
+    }
+
+    #[test]
+    fn stars_are_on_by_default_and_start_loading() {
+        let app = app_with(Config::default(), "stars-default");
+        assert!(app.config.show_stars);
+        assert_ne!(app.stars.state(), stars::StarsState::Off);
+    }
+
+    #[test]
+    fn a_config_with_stars_off_starts_without_them() {
+        let app = app_with(Config { show_stars: false, ..Config::default() }, "stars-off-start");
+        assert_eq!(app.stars.state(), stars::StarsState::Off);
+    }
+
+    #[test]
+    fn the_stars_option_hides_and_shows_them_and_is_saved() {
+        let mut app = app_with(Config::default(), "stars-toggle");
+        select_stars(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.config.show_stars);
+        assert_eq!(app.stars.state(), stars::StarsState::Off);
+        let text = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(text.contains("show_stars = off"), "{text}");
+        assert_eq!(Config::load_from(&app.config_path), Config { show_stars: false, ..Config::default() });
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.config.show_stars);
+        assert_ne!(app.stars.state(), stars::StarsState::Off);
+        assert!(std::fs::read_to_string(&app.config_path).unwrap().contains("show_stars = on"));
+        cleanup(&app);
+    }
+
+    #[test]
+    fn the_stars_option_does_not_touch_the_other_settings() {
+        let mut app = app_with(Config::default(), "stars-independent");
+        select_stars(&mut app);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(switches(&app), (true, true, true));
+        assert_eq!(app.config.update_ms, 1000);
+        assert!(!app.adjusting, "no es un ajuste numérico");
+        // Y al revés: cambiar animaciones o frecuencia no toca las estrellas.
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Char('-'));
+        assert!(!app.config.show_stars);
+        assert_eq!(app.stars.state(), stars::StarsState::Off);
+        cleanup(&app);
+    }
+
+    #[test]
+    fn plus_and_minus_do_nothing_on_the_stars_option() {
+        let mut app = app_with(Config::default(), "stars-plusminus");
+        select_stars(&mut app);
+        press(&mut app, KeyCode::Char('+'));
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!(app.config.update_ms, 1000);
+        assert!(app.config.show_stars);
+    }
+
+    #[test]
+    fn the_stars_poll_in_the_loop_picks_up_the_count() {
+        let mut app = app_with(Config::default(), "stars-poll");
+        app.stars.set_for_test(stars::StarsState::Count(7));
+        app.stars.poll(); // sin hilo de fondo no cambia nada
+        assert_eq!(app.stars.state(), stars::StarsState::Count(7));
+    }
+
+    #[test]
+    fn toggling_the_stars_does_not_change_how_fast_the_loop_runs() {
+        let mut app = app_with(all_off(), "stars-rate");
+        assert_eq!(app.frame_timeout(), IDLE_TICK);
+        select_stars(&mut app);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.frame_timeout(), IDLE_TICK);
+        cleanup(&app);
+    }
+
+    // ------------------------------------------------- frecuencia de actualización
+
+    #[test]
+    fn the_data_is_read_every_second_by_default() {
+        let mut app = app_with(Config::default(), "due-default");
+        assert!(!app.refresh_due());
+        app.last_refresh = ago(2);
+        assert!(app.refresh_due());
+    }
+
+    #[test]
+    fn the_update_interval_decides_when_a_refresh_is_due() {
+        let mut app = app_with(Config { update_ms: 20_000, ..Config::default() }, "due-slow");
+        app.last_refresh = ago(5);
+        assert!(!app.refresh_due(), "con 20000 ms, 5 s no bastan");
+        app.last_refresh = ago(21);
+        assert!(app.refresh_due());
+
+        let mut app = app_with(Config { update_ms: 100, ..Config::default() }, "due-fast");
+        app.last_refresh = Instant::now()
+            .checked_sub(Duration::from_millis(150))
+            .unwrap();
+        assert!(app.refresh_due(), "con 100 ms, 150 ms ya tocan");
+        app.last_refresh = Instant::now();
+        assert!(!app.refresh_due());
+    }
+
+    #[test]
+    fn changing_the_interval_applies_at_once() {
+        let mut app = app_with(Config { update_ms: 20_000, ..Config::default() }, "due-change");
+        app.last_refresh = ago(3);
+        assert!(!app.refresh_due());
+        app.overlay = Overlay::Options;
+        for _ in 0..50 {
+            press(&mut app, KeyCode::Char('-'));
+        }
+        assert_eq!(app.config.update_ms, 100);
+        assert!(app.refresh_due());
+        cleanup(&app);
+    }
+
+    #[test]
+    fn a_slow_read_is_not_stacked_with_another_one() {
+        let mut app = app_with(Config { update_ms: 100, ..Config::default() }, "due-flight");
+        app.last_refresh = ago(2);
+        app.refresh_since = Some(ago(1)); // todavía en marcha
+        assert!(!app.refresh_due());
+        app.refresh_since = Some(ago(30)); // se dio por perdida
+        assert!(app.refresh_due());
+        app.refresh_since = None; // ya llegó
+        assert!(app.refresh_due());
+    }
+
+    #[test]
+    fn the_reply_of_the_current_read_frees_the_next_one() {
+        let mut app = app_with(Config { update_ms: 100, ..Config::default() }, "due-reply");
+        app.refresh_id = 7;
+        app.refresh_since = Some(Instant::now());
+        app.last_refresh = ago(2);
+        // Una respuesta vieja no cuenta.
+        app.on_msg(Msg::Snapshot(6, Err(io::Error::other("vieja"))));
+        assert!(app.refresh_in_flight());
+        app.on_msg(Msg::Snapshot(7, Ok(wg::Snapshot { tunnels: Vec::new(), at: Instant::now() })));
+        assert!(!app.refresh_in_flight());
+        assert!(app.refresh_due());
+    }
+
+    fn tunnel_with_counters(rx: u64, tx: u64) -> Tunnel {
+        Tunnel {
+            name: "wg0".into(),
+            active: true,
+            busy: None,
+            conf: String::new(),
+            address: String::new(),
+            endpoint: String::new(),
+            public_key: String::new(),
+            listen_port: String::new(),
+            peers: vec![wg::Peer { rx, tx, ..wg::Peer::default() }],
+        }
+    }
+
+    #[test]
+    fn speeds_are_measured_even_with_a_100_ms_interval() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_millis(100);
+
+        let mut fast = app_with(Config { update_ms: 100, ..Config::default() }, "rate-fast");
+        fast.tunnels = vec![tunnel_with_counters(0, 0)];
+        fast.update_rates(t0);
+        fast.tunnels = vec![tunnel_with_counters(1000, 500)];
+        fast.update_rates(t1);
+        let (down, up) = fast.rates["wg0"];
+        assert!((down - 10_000.0).abs() < 1.0 && (up - 5_000.0).abs() < 1.0, "{down} {up}");
+        assert_eq!(fast.history["wg0"].len(), 1);
+
+        // Con 1000 ms (lo de siempre), 100 ms entre muestras es demasiado poco y se espera.
+        let mut normal = app_with(Config::default(), "rate-normal");
+        normal.tunnels = vec![tunnel_with_counters(0, 0)];
+        normal.update_rates(t0);
+        normal.tunnels = vec![tunnel_with_counters(1000, 500)];
+        normal.update_rates(t1);
+        assert!(normal.rates.is_empty());
+        normal.update_rates(t0 + Duration::from_millis(600));
+        assert!(normal.rates.contains_key("wg0"));
     }
 
     // ------------------------------------------------- animaciones independientes

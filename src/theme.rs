@@ -27,6 +27,8 @@ pub const BORDER: Color = rgb(0x2c313a);
 pub const ACCENT: Color = rgb(0xf2556a);
 pub const GREEN: Color = rgb(0x8bd49c);
 pub const YELLOW: Color = rgb(0xe5c07b);
+/// Contador de estrellas de GitHub de la cabecera.
+pub const STAR: Color = rgb(0xf5c24b);
 pub const RED: Color = rgb(0xe06c75);
 /// Bajada (↓) y subida (↑).
 pub const DOWN: Color = rgb(0x56b6c2);

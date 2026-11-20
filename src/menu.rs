@@ -11,10 +11,14 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::{App, MENU_ITEMS, config::Setting, theme::*};
+use crate::{
+    App, MENU_ITEMS, OPTION_TABS, OptionItem,
+    config::{MAX_UPDATE_MS, MIN_UPDATE_MS},
+    theme::*,
+};
 
 type Rgb = (u8, u8, u8);
 
@@ -130,7 +134,7 @@ pub fn banner_cell_color(row: usize, col: usize, elapsed: Option<Duration>) -> C
 // ------------------------------------------------------- texto de la cabecera
 
 /// Texto de una sola línea de la esquina superior izquierda (con animación activada).
-pub const HEADER_TEXT: &str = " WGC TUI ";
+pub const HEADER_TEXT: &str = " WgcTUI ";
 /// Etiqueta fija de siempre (con la animación desactivada).
 pub const HEADER_STATIC: &str = " wgctui ";
 
@@ -256,12 +260,17 @@ fn fade(color: Color, appear: f32) -> Color {
 /// Oscurece todo lo ya dibujado, como btop detrás de su menú: los colores se mezclan
 /// hacia el negro, así la interfaz sigue legible pero queda claramente al fondo.
 /// Con `appear < 1.0` el oscurecido es parcial: así el menú "entra" suavemente.
-fn dim_background(frame: &mut Frame, area: Rect, appear: f32) {
+/// `keep` es la esquina derecha de la cabecera (contador y estrellas): se queda como está.
+fn dim_background(frame: &mut Frame, area: Rect, appear: f32, keep: Option<Rect>) {
+    let corner = keep;
     let keep = 1.0 + (DIM_KEEP - 1.0) * appear.clamp(0.0, 1.0);
     let (fg, bg) = (rgb_of(FG, (214, 218, 228)), rgb_of(BG, (22, 24, 29)));
     let buffer = frame.buffer_mut();
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
+            if corner.is_some_and(|rect| rect.contains((x, y).into())) {
+                continue;
+            }
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 let (cfg, cbg) = (cell.fg, cell.bg);
                 cell.set_fg(darken(cfg, fg, keep));
@@ -317,7 +326,7 @@ pub fn render_menu(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let appear = appear_amount(app.menu_appear());
-    dim_background(frame, area, appear);
+    dim_background(frame, area, appear, app.header_keep);
 
     if fits_big_menu(area) {
         render_big_menu(
@@ -327,6 +336,7 @@ pub fn render_menu(frame: &mut Frame, area: Rect, app: &App) {
             banner_width(),
             app.banner_animation(),
             appear,
+            app.header_keep,
         );
     } else {
         render_compact_menu(frame, area, app.menu_selected, appear);
@@ -343,9 +353,15 @@ fn draw_banner(
     banner_w: u16,
     elapsed: Option<Duration>,
     appear: f32,
+    keep: Option<Rect>,
 ) {
     for (row, line) in BANNER.iter().enumerate() {
         for (col, ch) in line.chars().enumerate() {
+            // La esquina derecha de la cabecera (estrellas) queda por encima del banner.
+            let (cx, cy) = (x + col as u16, top + row as u16);
+            if keep.is_some_and(|rect| rect.contains((cx, cy).into())) {
+                continue;
+            }
             let style = Style::new()
                 .fg(fade(banner_cell_color(row, col, elapsed), appear))
                 .add_modifier(Modifier::BOLD);
@@ -374,11 +390,12 @@ fn render_big_menu(
     banner_w: u16,
     elapsed: Option<Duration>,
     appear: f32,
+    keep: Option<Rect>,
 ) {
     // Banner, versión, hueco y luego las palabras de 3 filas con 1 fila entre ellas.
     let total = big_menu_height();
     let top = area.y + area.height.saturating_sub(total) / 2;
-    draw_banner(frame, centered_x(area, banner_w), top, banner_w, elapsed, appear);
+    draw_banner(frame, centered_x(area, banner_w), top, banner_w, elapsed, appear, keep);
 
     let pw = PRODUCT.chars().count() as u16;
     if pw <= area.width {
@@ -495,89 +512,184 @@ fn draw_footer(frame: &mut Frame, area: Rect, appear: f32) {
 
 // ------------------------------------------------------------- opciones
 
-/// Nombre y descripción (dos líneas) de cada interruptor de la pantalla OPTIONS.
-fn option_text(setting: Setting) -> (&'static str, [&'static str; 2]) {
-    match setting {
-        Setting::Header => (
+/// Lo que se muestra de un ajuste: nombre, valor (con su color) y descripción.
+struct OptionText {
+    label: &'static str,
+    value: String,
+    value_color: Color,
+    description: String,
+}
+
+fn on_off(on: bool) -> (String, Color) {
+    if on {
+        ("ACTIVADA".to_string(), GREEN)
+    } else {
+        ("DESACTIVADA".to_string(), FG_MUTED)
+    }
+}
+
+fn option_text(app: &App, item: OptionItem) -> OptionText {
+    let animation = |label, description: &str| {
+        let (value, value_color) = on_off(item.setting().is_some_and(|s| app.config.get(s)));
+        OptionText { label, value, value_color, description: description.to_string() }
+    };
+    match item {
+        OptionItem::UpdateInterval => OptionText {
+            label: "Update interval",
+            value: format!("{} ms", app.config.update_ms),
+            value_color: YELLOW,
+            description: format!(
+                "Cada cuánto se leen los datos de WireGuard (estado, tráfico y gráfica). \
+                 Por defecto 1000 ms; de {MIN_UPDATE_MS} a {MAX_UPDATE_MS}. Menos ms = datos \
+                 más frescos y más CPU.\n\n\
+                 + / − (o Enter y luego + / −): de 100 en 100 ms hasta 1000 y de 500 en 500 después."
+            ),
+        },
+        OptionItem::GithubStars => {
+            let (value, value_color) = on_off(app.config.show_stars);
+            OptionText {
+                label: "GitHub stars",
+                value,
+                value_color,
+                description: format!(
+                    "Muestra las estrellas de github.com/{} arriba a la derecha de la \
+                     cabecera. Se consultan una vez por hora en segundo plano con curl y es la \
+                     única petición de red de wgctui; DESACTIVADA las oculta y no hace ninguna.",
+                    crate::stars::REPO
+                ),
+            }
+        }
+        OptionItem::HeaderAnimation => animation(
             "Header animation",
-            [
-                "Texto «WGC TUI» animado de la esquina superior izquierda.",
-                "Si se desactiva, vuelve a la etiqueta fija \" wgctui \".",
-            ],
+            "Texto «WGC TUI» animado de la esquina superior izquierda: barrido de luz y onda \
+             infinita. DESACTIVADA: vuelve la etiqueta fija \" wgctui \", sin animar.",
         ),
-        Setting::Banner => (
+        OptionItem::BannerAnimation => animation(
             "Banner animation",
-            [
-                "Barrido de luz y onda del banner grande del menú de Esc.",
-                "Si se desactiva, el banner sale ya terminado y estático.",
-            ],
+            "Barrido de luz y onda del banner grande del menú de Esc. DESACTIVADA: el banner \
+             se ve ya terminado y estático.",
         ),
-        Setting::Menu => (
+        OptionItem::MenuAnimation => animation(
             "Menu animation",
-            [
-                "Transición de aparición del propio menú de Esc.",
-                "Si se desactiva, el menú aparece de golpe, sin transición.",
-            ],
+            "Aparición del propio menú de Esc: el fondo se oscurece y el menú entra con un \
+             fundido. DESACTIVADA: el menú aparece de golpe, sin transición.",
         ),
     }
 }
 
-/// Pantalla de opciones del menú de Esc: un interruptor por animación.
+/// Pantalla de opciones del menú de Esc, como la de runetui: pestañas arriba, los ajustes de
+/// la pestaña a la izquierda y la descripción del seleccionado a la derecha.
 pub fn render_options(frame: &mut Frame, area: Rect, app: &App) {
-    if area.width == 0 || area.height == 0 {
+    if area.width < 30 || area.height < 8 {
+        render_menu(frame, area, app);
         return;
     }
-    dim_background(frame, area, 1.0);
+    dim_background(frame, area, 1.0, app.header_keep);
 
-    let mut lines: Vec<Line<'static>> = vec![Line::from("")];
-    for (index, setting) in Setting::ALL.into_iter().enumerate() {
-        let selected = index == app.options_selected;
-        let (title, description) = option_text(setting);
-        let value = if app.config.get(setting) {
-            badge(" ACTIVADA ", GREEN)
-        } else {
-            Span::styled(" DESACTIVADA ", Style::new().fg(FG_MUTED).bg(BORDER))
-        };
-        let mut row = Line::from(vec![
-            sp(if selected { " ▍ " } else { "   " }, ACCENT),
-            bold(format!("{title:<18}"), if selected { FG } else { FG_DIM }),
-            value,
-        ]);
-        if selected {
-            row = row.style(Style::new().bg(BG_SEL));
-        }
-        lines.push(row);
-        for text in description {
-            lines.push(Line::from(sp(format!("   {text}"), FG_MUTED)));
-        }
-        lines.push(Line::from(""));
-    }
-    lines.push(Line::from(sp(
-        "   ↑ ↓ moverse · Enter · Espacio · ← → cambiar · Esc volver",
-        FG_DIM,
-    )));
-
-    let width = 66u16.min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
+    let width = area.width.saturating_sub(4).min(84);
+    let height = area.height.saturating_sub(2).min(18);
     let rect = Rect::new(
         centered_x(area, width),
         area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
     );
+    let block = framed("OPTIONS");
+    let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
-    frame.render_widget(Paragraph::new(lines).block(framed("OPCIONES")), rect);
+    frame.render_widget(block, rect);
+
+    // Pestañas.
+    let tab = app.options_tab.min(OPTION_TABS.len() - 1);
+    let mut spans = vec![Span::raw(" ")];
+    for (index, entry) in OPTION_TABS.iter().enumerate() {
+        let style = if index == tab {
+            Style::new().fg(BG).bg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(FG_DIM)
+        };
+        spans.push(Span::styled(format!(" {} ", entry.name), style));
+        spans.push(Span::raw(" "));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let body = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(4));
+    let list_width = (body.width * 40 / 100).max(32).min(body.width);
+    let list = Rect::new(body.x, body.y, list_width, body.height);
+    let detail = Rect::new(body.x + list_width, body.y, body.width - list_width, body.height);
+
+    // Ajustes de la pestaña activa.
+    let items = OPTION_TABS[tab].items;
+    let selected = app.options_selected.min(items.len() - 1);
+    for (index, item) in items.iter().enumerate() {
+        let row = list.y + index as u16;
+        if row >= list.y + list.height {
+            break;
+        }
+        let mut text = option_text(app, *item);
+        let is_selected = index == selected;
+        if is_selected && app.adjusting && item.is_adjustable() {
+            text.value = format!("◂ {} ▸", text.value);
+        }
+        let style = if is_selected {
+            Style::new().fg(FG).bg(BG_SEL).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(FG_DIM)
+        };
+        let value_style = style.fg(text.value_color);
+        let marker = if is_selected { "❯ " } else { "  " };
+        let used = 2 + text.label.chars().count() + text.value.chars().count();
+        let gap = (list.width as usize).saturating_sub(used + 1).max(1);
+        let line = Line::from(vec![
+            Span::styled(format!("{marker}{}", text.label), style),
+            Span::styled(" ".repeat(gap), style),
+            Span::styled(text.value, value_style),
+            Span::styled(" ", style),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(style), Rect::new(list.x, row, list.width, 1));
+    }
+
+    // Descripción del ajuste seleccionado.
+    let text = option_text(app, items[selected]);
+    let block = Block::new().borders(Borders::LEFT).border_style(Style::new().fg(BORDER));
+    let text_area = block.inner(detail);
+    frame.render_widget(block, detail);
+    let mut lines = vec![
+        Line::from(bold(text.label, ACCENT)),
+        Line::default(),
+    ];
+    lines.extend(text.description.split('\n').map(|l| Line::from(sp(l.to_string(), FG_DIM))));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }),
+        Rect::new(
+            text_area.x + 1,
+            text_area.y,
+            text_area.width.saturating_sub(1),
+            text_area.height,
+        ),
+    );
+
+    let (hint, color) = if app.adjusting {
+        ("+ / − ajustar · Enter o Esc listo", YELLOW)
+    } else {
+        ("↑↓ mover · ←→ pestaña · Enter cambiar · + / − frecuencia · Esc volver", FG_MUTED)
+    };
+    let hint: String = hint.chars().take(inner.width.saturating_sub(2) as usize).collect();
+    put_text(frame, inner.x + 1, inner.y + inner.height - 1, &hint, Style::new().fg(color));
 }
 
 // --------------------------------------------------------------- ayuda
 
-pub fn render_help(frame: &mut Frame, area: Rect) {
+pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    dim_background(frame, area, 1.0);
+    dim_background(frame, area, 1.0, app.header_keep);
 
-    const KEYS: [(&str, &str); 9] = [
+    const KEYS: [(&str, &str); 10] = [
         ("↑ ↓  ·  j k", "Moverte por la lista de túneles"),
         ("g  ·  G", "Ir al primero / al último"),
         ("Enter  ·  Espacio", "Activar o desactivar el túnel"),
@@ -585,7 +697,8 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
         ("PgUp  ·  PgDn", "Desplazar el panel de detalle"),
         ("r", "Refrescar ahora"),
         ("Esc", "Abrir o cerrar el menú (OPTIONS · HELP · QUIT)"),
-        ("En OPTIONS", "↑ ↓ elegir · Enter / Espacio / ← → cambiar"),
+        ("En OPTIONS", "↑ ↓ mover · ← → pestaña · Enter cambiar"),
+        ("+  ·  −", "Frecuencia de actualización (en OPTIONS)"),
         ("q  ·  Ctrl+C", "Salir (los túneles quedan como estén)"),
     ];
 
@@ -607,8 +720,9 @@ pub fn render_help(frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     for note in [
         "Puedes tener varios túneles activos a la vez.",
+        "★ N: estrellas de GitHub del repo (se ocultan en OPTIONS → General).",
         "Animaciones (OPTIONS): cabecera, banner y menú, cada una por su",
-        "cuenta; se guardan en /etc/wgctui.conf.",
+        "cuenta. Ajustes y frecuencia (100–20000 ms) en /etc/wgctui.conf.",
         "Pulsa cualquier tecla para volver.",
     ] {
         lines.push(Line::from(vec![Span::raw("  "), sp(note, FG_MUTED)]));
@@ -645,6 +759,7 @@ mod tests {
             header_animation: false,
             banner_animation: false,
             menu_animation: false,
+            ..Config::default()
         }
     }
 
@@ -698,8 +813,8 @@ mod tests {
             let buf = render(&mut app, w, h);
             let top = row_text(&buf, 0);
             let second = row_text(&buf, 1);
-            assert!(top.contains("WGC TUI"), "{w}x{h}: {top:?}");
-            assert!(!second.contains("WGC TUI"), "{w}x{h}: la cabecera no debe ocupar 2 filas");
+            assert!(top.contains(HEADER_TEXT.trim()), "{w}x{h}: {top:?}");
+            assert!(!second.contains(HEADER_TEXT.trim()), "{w}x{h}: la cabecera no debe ocupar 2 filas");
             // La fila 1 ya es el cuerpo (borde del panel), no más cabecera.
             assert!(second.contains('┌') || second.contains('╭') || second.contains('│'), "{w}x{h}: {second:?}");
         }
@@ -711,7 +826,7 @@ mod tests {
         app.header_start = at_secs(30); // ya en la onda infinita
         let buf = render(&mut app, 80, 24);
         let top = row_text(&buf, 0);
-        assert!(top.starts_with(" WGC TUI "), "{top:?}");
+        assert!(top.starts_with(HEADER_TEXT), "{top:?}");
         // Las letras llevan colores de la marca (rojos), no el fondo rojo de la etiqueta fija.
         let mut colors = Vec::new();
         for x in 1..8u16 {
@@ -953,45 +1068,344 @@ mod tests {
 
     // ---------------------------------------------------------------- opciones
 
-    #[test]
-    fn options_lists_three_switches_with_their_state() {
-        let mut app = app_with(Config { banner_animation: false, ..Config::default() });
+    fn options_app(config: Config, tab: usize, selected: usize) -> App {
+        let mut app = app_with(config);
         app.overlay = Overlay::Options;
+        app.options_tab = tab;
+        app.options_selected = selected;
+        app
+    }
+
+    #[test]
+    fn options_has_tabs_on_top_with_the_active_one_highlighted() {
+        for tab in 0..2usize {
+            let mut app = options_app(Config::default(), tab, 0);
+            let buf = render(&mut app, 100, 30);
+            let y = (0..30u16).find(|&y| row_text(&buf, y).contains("General")).unwrap();
+            let row = row_text(&buf, y);
+            assert!(row.contains("General") && row.contains("Animaciones"), "{row:?}");
+            // Solo la pestaña activa lleva el fondo de acento.
+            let bg_at = |name: &str| buf[(col_of(&buf, y, name), y)].bg;
+            let names = ["General", "Animaciones"];
+            for (i, name) in names.iter().enumerate() {
+                assert_eq!(bg_at(name) == ACCENT, i == tab, "pestaña {name} (activa: {tab})");
+            }
+        }
+    }
+
+    #[test]
+    fn general_tab_shows_the_update_interval_with_its_description() {
+        let mut app = options_app(Config::default(), 0, 0);
+        let text = screen(&render(&mut app, 100, 30));
+        assert!(text.contains("Update interval") && text.contains("1000 ms"), "{text}");
+        assert!(text.contains("20000"));
+        assert!(!text.contains("Header animation"), "las animaciones están en su pestaña");
+    }
+
+    // ---------------------------------------------------------------- estrellas
+
+    fn with_stars(state: crate::stars::StarsState, config: Config) -> App {
+        let mut app = app_with(config);
+        app.stars.set_for_test(state);
+        app
+    }
+
+    #[test]
+    fn the_header_shows_the_star_count_at_the_far_right() {
+        use crate::stars::StarsState::Count;
+        for (w, h) in [(120u16, 30u16), (100, 24), (80, 24)] {
+            let mut app = with_stars(Count(1234), Config::default());
+            let top = row_text(&render(&mut app, w, h), 0);
+            assert!(top.trim_end().ends_with("★ 1.2k"), "{w}x{h}: {top:?}");
+            // Detrás del contador de túneles, con el hueco de margen de siempre.
+            assert!(top.find("activos").unwrap() < top.find('★').unwrap(), "{top:?}");
+            assert_eq!(top.chars().last(), Some(' '), "{top:?}");
+        }
+    }
+
+    #[test]
+    fn the_star_count_is_gold_and_bold() {
+        let mut app = with_stars(crate::stars::StarsState::Count(42), Config::default());
+        let buf = render(&mut app, 100, 24);
+        let top = row_text(&buf, 0);
+        let x = col_of(&buf, 0, "★ 42");
+        assert_eq!(buf[(x, 0)].fg, STAR);
+        assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD));
+        assert!(top.contains("★ 42"));
+    }
+
+    #[test]
+    fn the_stars_follow_their_state() {
+        use crate::stars::StarsState::*;
+        for (state, expected) in [(Loading, "★ …"), (Unavailable, "★ —"), (Count(0), "★ 0"), (Count(15_900), "★ 15.9k")] {
+            let mut app = with_stars(state, Config::default());
+            let top = row_text(&render(&mut app, 100, 24), 0);
+            assert!(top.trim_end().ends_with(expected), "{state:?}: {top:?}");
+        }
+    }
+
+    #[test]
+    fn hidden_stars_leave_no_trace_in_the_header() {
+        let mut app = with_stars(crate::stars::StarsState::Count(42), Config::default());
+        app.config.show_stars = false;
+        app.stars.set_enabled(false);
+        let top = row_text(&render(&mut app, 100, 24), 0);
+        assert!(!top.contains('★'), "{top:?}");
+        assert!(top.trim_end().ends_with("activos"), "{top:?}");
+    }
+
+    #[test]
+    fn stars_are_the_first_thing_dropped_when_the_header_is_tight() {
+        let mut app = with_stars(crate::stars::StarsState::Count(42), Config::default());
+        let roomy = row_text(&render(&mut app, 60, 24), 0);
+        assert!(roomy.contains('★') && roomy.contains("activos"), "{roomy:?}");
+        // Con una cabecera muy corta se quitan las estrellas y se conserva el contador.
+        let mut found_without_stars = false;
+        for width in (24..60u16).rev() {
+            let top = row_text(&render(&mut app, width, 24), 0);
+            if top.contains("activos") && !top.contains('★') {
+                found_without_stars = true;
+                break;
+            }
+        }
+        assert!(found_without_stars);
+        // Nunca queda una estrella cortada o sola sin su número.
+        for width in 10..60u16 {
+            let top = row_text(&render(&mut app, width, 24), 0);
+            if top.contains('★') {
+                assert!(top.contains("★ 42"), "{width}: {top:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_esc_menu_leaves_the_header_corner_with_the_stars_undimmed() {
+        let mut app = with_stars(crate::stars::StarsState::Count(42), all_off());
+        let calm = render(&mut app, 120, 30);
+        let x = col_of(&calm, 0, "★ 42");
+        let (fg_before, bg_before) = (calm[(x, 0)].fg, calm[(x, 0)].bg);
+
+        for overlay in [Overlay::Menu, Overlay::Options, Overlay::Help] {
+            let mut app = with_stars(crate::stars::StarsState::Count(42), all_off());
+            app.overlay = overlay;
+            let buf = render(&mut app, 120, 30);
+            let x = col_of(&buf, 0, "★ 42");
+            assert_eq!((buf[(x, 0)].fg, buf[(x, 0)].bg), (fg_before, bg_before));
+            assert!(row_text(&buf, 0).trim_end().ends_with("★ 42"));
+            // El resto de la cabecera sí está oscurecido.
+            assert_ne!(buf[(1, 0)].bg, calm[(1, 0)].bg);
+        }
+    }
+
+    #[test]
+    fn the_stars_also_show_during_the_menu_transition() {
+        let mut app = with_stars(crate::stars::StarsState::Count(42), Config { banner_animation: false, header_animation: false, ..Config::default() });
+        app.overlay = Overlay::Menu;
+        app.menu_opened = Some(Instant::now());
+        let buf = render(&mut app, 120, 30);
+        let x = col_of(&buf, 0, "★ 42");
+        assert_eq!(buf[(x, 0)].fg, STAR);
+    }
+
+    #[test]
+    fn the_big_banner_never_paints_over_the_stars() {
+        // Con 80x26 el banner empieza en la fila 0 y cruza la esquina de la cabecera.
+        let mut app = with_stars(crate::stars::StarsState::Count(42), all_off());
+        app.overlay = Overlay::Menu;
+        let buf = render(&mut app, 80, 26);
+        assert!(row_text(&buf, 0).trim_end().ends_with("★ 42"), "{:?}", row_text(&buf, 0));
+    }
+
+    #[test]
+    fn the_stars_option_is_listed_in_the_general_tab() {
+        let mut app = options_app(Config::default(), 0, 1);
+        let buf = render(&mut app, 100, 24);
+        let text = screen(&buf);
+        assert!(text.contains("GitHub stars") && text.contains("Update interval"));
+        let y = list_row(&buf, "GitHub stars");
+        assert!(row_text(&buf, y).contains("❯ GitHub stars"));
+        assert!(row_text(&buf, y).contains("ACTIVADA"));
+        // Heading and description of the selected row.
+        assert!(text.contains("fir3desert/WgcTUI"), "{text}");
+        assert!(text.contains("curl"));
+    }
+
+    #[test]
+    fn the_stars_option_shows_its_state() {
+        let mut app = options_app(Config { show_stars: false, ..Config::default() }, 0, 1);
+        let buf = render(&mut app, 100, 24);
+        let y = list_row(&buf, "GitHub stars");
+        assert!(row_text(&buf, y).contains("DESACTIVADA"));
+    }
+
+    #[test]
+    fn the_stars_description_fits_a_24_row_terminal() {
+        for width in [80u16, 100] {
+            let mut app = options_app(Config::default(), 0, 1);
+            let text = screen(&render(&mut app, width, 24));
+            assert!(text.contains("ninguna."), "{width}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn update_interval_value_follows_the_setting() {
+        let mut app = options_app(Config { update_ms: 250, ..Config::default() }, 0, 0);
+        assert!(screen(&render(&mut app, 100, 30)).contains("250 ms"));
+        app.config.update_ms = 20_000;
+        assert!(screen(&render(&mut app, 100, 30)).contains("20000 ms"));
+    }
+
+    #[test]
+    fn adjusting_shows_arrows_around_the_value_and_a_different_hint() {
+        let mut app = options_app(Config::default(), 0, 0);
+        let calm = screen(&render(&mut app, 100, 30));
+        assert!(calm.contains("Enter cambiar") && !calm.contains('◂'));
+        app.adjusting = true;
+        let buf = render(&mut app, 100, 30);
+        let text = screen(&buf);
+        assert!(text.contains("◂ 1000 ms ▸"), "{text}");
+        assert!(text.contains("+ / − ajustar") && text.contains("Enter o Esc listo"));
+        assert!(!text.contains("Enter cambiar"));
+        // El aviso de ajuste va en amarillo.
+        let y = (0..30u16).find(|&y| row_text(&buf, y).contains("ajustar")).unwrap();
+        assert_eq!(buf[(col_of(&buf, y, "+ / −"), y)].fg, YELLOW);
+    }
+
+    #[test]
+    fn animations_tab_lists_three_switches_with_their_state() {
+        let mut app = options_app(Config { banner_animation: false, ..Config::default() }, 1, 0);
         let text = screen(&render(&mut app, 100, 30));
         for name in ["Header animation", "Banner animation", "Menu animation"] {
             assert!(text.contains(name), "falta {name}");
         }
-        assert_eq!(text.matches(" ACTIVADA ").count(), 2);
-        assert_eq!(text.matches("DESACTIVADA").count(), 1);
+        assert!(!text.contains("Update interval"));
+        // En la lista (izquierda) hay dos ACTIVADA y una DESACTIVADA; la descripción
+        // de la derecha menciona DESACTIVADA, pero no como valor.
+        let value_rows: Vec<&str> = text
+            .lines()
+            .filter(|l| ["Header animation", "Banner animation", "Menu animation"].iter().any(|n| l.contains(n)))
+            .collect();
+        assert_eq!(value_rows.len(), 3);
+        let on = value_rows.iter().filter(|l| l.contains(" ACTIVADA")).count();
+        let off = value_rows.iter().filter(|l| l.contains("DESACTIVADA")).count();
+        assert_eq!((on, off), (2, 1));
+        let banner = value_rows.iter().find(|l| l.contains("Banner animation")).unwrap();
+        assert!(banner.contains("DESACTIVADA"));
+        // Orden: Header, Banner, Menu.
         let line_of = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap();
         assert!(line_of("Header animation") < line_of("Banner animation"));
         assert!(line_of("Banner animation") < line_of("Menu animation"));
-        // El banner es el desactivado.
-        assert!(text.lines().nth(line_of("Banner animation")).unwrap().contains("DESACTIVADA"));
-        assert!(text.contains("etiqueta fija"));
-        assert!(text.contains("de golpe"));
     }
 
     #[test]
-    fn options_highlights_the_selected_switch() {
-        let mut app = app_with(Config::default());
-        app.overlay = Overlay::Options;
-        app.options_selected = 1;
+    fn animation_values_are_coloured_green_when_on_and_muted_when_off() {
+        let mut app = options_app(Config { menu_animation: false, ..Config::default() }, 1, 0);
         let buf = render(&mut app, 100, 30);
-        let y = (0..30u16).find(|&y| row_text(&buf, y).contains("Banner animation")).unwrap();
-        assert!(row_text(&buf, y).contains('▍'));
-        let other = (0..30u16).find(|&y| row_text(&buf, y).contains("Header animation")).unwrap();
-        assert!(!row_text(&buf, other).contains('▍'));
-        let x = (0..100u16).find(|&x| buf[(x, y)].symbol() == "B").unwrap();
-        assert_eq!(buf[(x, y)].bg, BG_SEL);
+        let colour_of_value = |label: &str, value: &str| {
+            let y = (0..30u16).find(|&y| row_text(&buf, y).contains(label)).unwrap();
+            let row = row_text(&buf, y);
+            let byte = row.find(label).unwrap();
+            let rest = &row[byte..];
+            let at = rest.find(value).unwrap();
+            let x = row[..byte].chars().count() + rest[..at].chars().count();
+            buf[(x as u16, y)].fg
+        };
+        assert_eq!(colour_of_value("Header animation", "ACTIVADA"), GREEN);
+        assert_eq!(colour_of_value("Menu animation", "DESACTIVADA"), FG_MUTED);
+    }
+
+    /// Fila de la lista (izquierda) del ajuste `label`: la que lleva su valor.
+    fn list_row(buf: &Buffer, label: &str) -> u16 {
+        (0..buf.area.height)
+            .find(|&y| {
+                // Primer tramo entre divisores = la lista; el segundo, la descripción.
+                row_text(buf, y).split('│').nth(1).is_some_and(|list| {
+                    list.contains(label) && (list.contains("ACTIVADA") || list.contains(" ms"))
+                })
+            })
+            .unwrap_or_else(|| panic!("no hay fila para {label}"))
+    }
+
+    #[test]
+    fn the_selected_row_has_the_marker_and_highlight() {
+        let mut app = options_app(Config::default(), 1, 1);
+        let buf = render(&mut app, 100, 30);
+        let y = list_row(&buf, "Banner animation");
+        assert!(row_text(&buf, y).contains("❯ Banner animation"));
+        assert_eq!(buf[(col_of(&buf, y, "Banner"), y)].bg, BG_SEL);
+        let other = list_row(&buf, "Header animation");
+        assert!(!row_text(&buf, other).contains('❯'));
+        assert_ne!(buf[(col_of(&buf, other, "Header"), other)].bg, BG_SEL);
+    }
+
+    #[test]
+    fn the_description_on_the_right_follows_the_selected_item() {
+        let labels = ["Header animation", "Banner animation", "Menu animation"];
+        for (selected, label) in labels.iter().enumerate() {
+            let mut app = options_app(Config::default(), 1, selected);
+            let buf = render(&mut app, 110, 30);
+            // La primera fila del cuerpo trae, a la derecha del divisor, el título del elegido.
+            let row = row_text(&buf, list_row(&buf, "Header animation"));
+            let segments: Vec<&str> = row.split('│').collect();
+            assert!(segments[2].contains(label), "item {selected}: {row:?}");
+        }
+        // Y el texto de cada descripción es el de la opción.
+        for (item, phrase) in [
+            (OptionItem::HeaderAnimation, "etiqueta fija"),
+            (OptionItem::BannerAnimation, "ya terminado y estático"),
+            (OptionItem::MenuAnimation, "aparece de golpe"),
+            (OptionItem::UpdateInterval, "de 100 en 100 ms"),
+        ] {
+            let app = app_with(Config::default());
+            assert!(option_text(&app, item).description.contains(phrase), "{item:?}");
+        }
+    }
+
+    #[test]
+    fn long_descriptions_are_not_cut_off_in_a_24_row_terminal() {
+        for (width, height) in [(80u16, 24u16), (100, 24), (120, 30)] {
+            let mut app = options_app(Config::default(), 0, 0);
+            let text = screen(&render(&mut app, width, height));
+            // La última palabra de la descripción del intervalo tiene que verse entera.
+            assert!(text.contains("después."), "{width}x{height}:\n{text}");
+            for selected in 0..3 {
+                let mut app = options_app(Config::default(), 1, selected);
+                let text = screen(&render(&mut app, width, height));
+                    assert!(
+                    text.contains("animar.") || text.contains("estático.") || text.contains("transición."),
+                    "{width}x{height} item {selected}:\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn options_screen_has_a_framed_title_and_a_hint_line() {
+        let mut app = options_app(Config::default(), 0, 0);
+        let text = screen(&render(&mut app, 100, 30));
+        assert!(text.contains("OPTIONS"));
+        assert!(text.contains("↑↓ mover") && text.contains("←→ pestaña") && text.contains("Esc volver"));
     }
 
     #[test]
     fn options_fit_a_24_row_terminal() {
-        let mut app = app_with(Config::default());
-        app.overlay = Overlay::Options;
+        for tab in 0..2usize {
+            let mut app = options_app(Config::default(), tab, 0);
+            let text = screen(&render(&mut app, 80, 24));
+            assert!(text.contains("General") && text.contains("Animaciones"));
+            assert!(text.contains("Esc volver"), "tab {tab}");
+        }
+        let mut app = options_app(Config::default(), 1, 2);
         let text = screen(&render(&mut app, 80, 24));
-        assert!(text.contains("Menu animation") && text.contains("Esc volver"));
+        assert!(text.contains("Menu animation"));
+    }
+
+    #[test]
+    fn options_on_a_tiny_terminal_falls_back_to_the_menu_instead_of_panicking() {
+        let mut app = options_app(Config::default(), 1, 1);
+        let _ = render(&mut app, 25, 7);
+        let _ = render(&mut app, 12, 4);
+        let _ = render(&mut app, 80, 9);
     }
 
     #[test]
@@ -1001,6 +1415,8 @@ mod tests {
         let text = screen(&render(&mut app, 100, 30));
         assert!(text.contains("OPTIONS · HELP · QUIT"));
         assert!(text.contains("/etc/wgctui.conf"));
+        assert!(text.contains("Frecuencia de actualización"));
+        assert!(text.contains("100–20000 ms"));
         assert!(!text.contains("RESUME"));
     }
 
@@ -1011,19 +1427,25 @@ mod tests {
         let show = |title: &str, app: &mut App, w: u16, h: u16| {
             println!("\n===== {title} ({w}x{h}) =====\n{}", screen(&render(app, w, h)));
         };
-        let mut app = app_with(Config::default());
+        let mut app = with_stars(crate::stars::StarsState::Count(1234), Config::default());
         app.header_start = at_secs(30);
-        show("Cabecera con animación activada", &mut app, 80, 6);
+        show("Cabecera con animación activada y estrellas", &mut app, 80, 6);
+        app.config.show_stars = false;
+        app.stars.set_enabled(false);
+        show("Cabecera con estrellas ocultas", &mut app, 80, 6);
         let mut app = app_with(Config { header_animation: false, ..Config::default() });
         show("Cabecera con animación desactivada", &mut app, 80, 6);
-        let mut app = app_with(all_off());
+        let mut app = with_stars(crate::stars::StarsState::Count(42), all_off());
         app.overlay = Overlay::Menu;
         show("Menú de Esc grande (26 filas)", &mut app, 100, 26);
         show("Menú de Esc compacto", &mut app, 60, 14);
-        let mut app = app_with(Config { banner_animation: false, ..Config::default() });
-        app.overlay = Overlay::Options;
-        app.options_selected = 1;
-        show("OPTIONS", &mut app, 80, 24);
+        let mut app = options_app(Config::default(), 0, 0);
+        show("OPTIONS · General", &mut app, 100, 24);
+        app.adjusting = true;
+        show("OPTIONS · General (ajustando)", &mut app, 100, 24);
+        let mut app = options_app(Config { banner_animation: false, ..Config::default() }, 1, 1);
+        show("OPTIONS · Animaciones", &mut app, 100, 24);
+        show("OPTIONS · Animaciones (80x24)", &mut app, 80, 24);
         app.overlay = Overlay::Help;
         show("HELP", &mut app, 90, 26);
     }
