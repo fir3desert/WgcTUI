@@ -1,4 +1,4 @@
-//! Todo lo que toca WireGuard: leer los .conf, el estado en vivo y activar/desactivar.
+//! WireGuard operations: reading .conf files and live status, and enabling/disabling tunnels.
 
 use std::{
     collections::HashMap, fs, io, os::unix::process::CommandExt, path::Path, process::Command,
@@ -28,13 +28,13 @@ struct Iface {
 pub struct Tunnel {
     pub name: String,
     pub active: bool,
-    /// Some(true) = activando, Some(false) = desactivando
+    /// Some(true) = enabling, Some(false) = disabling.
     pub busy: Option<bool>,
-    /// Contenido del .conf con las claves ocultas.
+    /// .conf contents with keys hidden.
     pub conf: String,
     pub address: String,
     pub endpoint: String,
-    /// Solo con el túnel activo.
+    /// Only available when the tunnel is active.
     pub public_key: String,
     pub listen_port: String,
     pub peers: Vec<Peer>,
@@ -52,30 +52,30 @@ impl Tunnel {
     }
 }
 
-/// Estado de los túneles en el instante en que se leyó, para calcular velocidades.
+/// Tunnel state when read, used to calculate speeds.
 pub struct Snapshot {
     pub tunnels: Vec<Tunnel>,
     pub at: Instant,
 }
 
-/// Mensajes que los hilos de trabajo envían a la interfaz.
+/// Messages sent to the interface by worker threads.
 pub enum Msg {
-    /// Terminó un `wg-quick up/down`.
+    /// A `wg-quick up/down` command finished.
     Toggled {
         name: String,
         up: bool,
         result: Result<(), String>,
     },
-    /// Llegó una instantánea pedida con `spawn_refresh` (id para descartar viejas).
+    /// A snapshot requested by `spawn_refresh` arrived (the ID discards stale responses).
     Snapshot(u64, io::Result<Snapshot>),
 }
 
-/// Un túnel está activo si existe su interfaz de red (wg-quick usa el nombre del .conf).
+/// A tunnel is active if its network interface exists (`wg-quick` uses the .conf file name).
 pub fn is_active(name: &str) -> bool {
     Path::new("/sys/class/net").join(name).exists()
 }
 
-/// Lee el .conf ocultando claves privadas y preshared.
+/// Read the .conf file, hiding private and preshared keys.
 fn read_redacted(path: &Path) -> String {
     match fs::read_to_string(path) {
         Ok(txt) => txt
@@ -83,20 +83,20 @@ fn read_redacted(path: &Path) -> String {
             .map(|l| {
                 let low = l.trim().to_lowercase();
                 if low.starts_with("privatekey") {
-                    "PrivateKey = (oculta)".to_string()
+                    "PrivateKey = (hidden)".to_string()
                 } else if low.starts_with("presharedkey") {
-                    "PresharedKey = (oculta)".to_string()
+                    "PresharedKey = (hidden)".to_string()
                 } else {
                     l.to_string()
                 }
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        Err(e) => format!("No puedo leer {}: {e}", path.display()),
+        Err(e) => format!("Could not read {}: {e}", path.display()),
     }
 }
 
-/// Saca la primera Address y el primer Endpoint del .conf.
+/// Extract the first Address and Endpoint from the .conf file.
 fn parse_conf_summary(conf: &str) -> (String, String) {
     let (mut address, mut endpoint) = (String::new(), String::new());
     for line in conf.lines() {
@@ -115,8 +115,8 @@ fn parse_conf_summary(conf: &str) -> (String, String) {
     (address, endpoint)
 }
 
-/// `wg show all dump`: una línea por interfaz (5 campos) y una por peer (9 campos),
-/// separados por tabulador.
+/// `wg show all dump`: one line per interface (5 fields) and one per peer (9 fields),
+/// separated by tabs.
 fn read_wg_dump() -> HashMap<String, Iface> {
     let mut map: HashMap<String, Iface> = HashMap::new();
     let Ok(out) = Command::new("wg").args(["show", "all", "dump"]).output() else {
@@ -184,22 +184,22 @@ fn last_lines(s: &str, n: usize) -> String {
     lines[start..].join(" | ")
 }
 
-/// Lanza `wg-quick up|down` en su propio hilo: así puedes pedir varios a la vez
-/// y la interfaz no se bloquea.
+/// Run `wg-quick up|down` on its own thread so multiple operations can be requested at once
+/// without blocking the interface.
 pub fn spawn_toggle(name: String, up: bool, tx: Sender<Msg>) {
     thread::spawn(move || {
         let action = if up { "up" } else { "down" };
         let result = match Command::new("wg-quick").args([action, name.as_str()]).output() {
             Ok(o) if o.status.success() => Ok(()),
             Ok(o) => Err(last_lines(&String::from_utf8_lossy(&o.stderr), 2)),
-            Err(e) => Err(format!("no puedo ejecutar wg-quick: {e}")),
+            Err(e) => Err(format!("Could not run wg-quick: {e}")),
         };
         let _ = tx.send(Msg::Toggled { name, up, result });
     });
 }
 
-/// Lee los `.conf` y `wg show all dump` en un hilo. Hacerlo en el hilo de dibujo
-/// congelaba la animación del menú cada vez que se refrescaba el estado.
+/// Read the `.conf` files and run `wg show all dump` on a worker thread. Doing this on the draw
+/// thread froze the menu animation whenever the status was refreshed.
 pub fn spawn_refresh(id: u64, tx: Sender<Msg>) {
     thread::spawn(move || {
         let at = Instant::now();
@@ -208,7 +208,7 @@ pub fn spawn_refresh(id: u64, tx: Sender<Msg>) {
     });
 }
 
-/// Si no somos root, nos relanzamos con sudo (pedirá la contraseña antes de abrir la TUI).
+/// If we are not root, relaunch with sudo (it prompts for a password before opening the TUI).
 pub fn ensure_root() {
     if unsafe { libc::geteuid() } == 0 {
         return;
@@ -216,7 +216,7 @@ pub fn ensure_root() {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("No puedo localizar el ejecutable: {e}");
+            eprintln!("Could not locate the executable: {e}");
             std::process::exit(1);
         }
     };
@@ -224,11 +224,11 @@ pub fn ensure_root() {
         .arg(exe)
         .args(std::env::args().skip(1))
         .exec();
-    eprintln!("Hace falta root para leer {WG_DIR} y usar wg-quick. Ejecuta con sudo. ({err})");
+    eprintln!("Root privileges are required to read {WG_DIR} and use wg-quick. Run with sudo. ({err})");
     std::process::exit(1);
 }
 
-/// Hora local HH:MM:SS (sin dependencias extra).
+/// Local time in HH:MM:SS format (without additional dependencies).
 pub fn clock() -> String {
     unsafe {
         let mut t: libc::time_t = 0;

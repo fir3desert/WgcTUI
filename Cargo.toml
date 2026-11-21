@@ -2,7 +2,7 @@
 name = "wgctui"
 version = "0.2.0"
 edition = "2021"
-description = "WireGuard TUI Cliente: activa y desactiva varios túneles a la vez"
+description = "WireGuard TUI for enabling and disabling multiple tunnels"
 
 [dependencies]
 ratatui = "0.29"

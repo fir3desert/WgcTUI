@@ -1,4 +1,4 @@
-//! wgctui: cliente TUI para WireGuard. Activa y desactiva varios túneles a la vez.
+//! wgctui: a WireGuard TUI client for enabling and disabling multiple tunnels.
 
 mod config;
 mod finder;
@@ -27,30 +27,30 @@ use finder::Finder;
 use stars::Stars;
 use wg::{Msg, Tunnel, WG_DIR};
 
-/// Si una lectura de datos tarda más que esto, se da por perdida y se permite pedir otra.
+/// A data read is considered stuck after this delay, allowing another read to be requested.
 const REFRESH_STUCK: Duration = Duration::from_secs(5);
-/// Muestras de velocidad que se guardan para la gráfica (una por refresco).
+/// Speed samples retained for the graph (one per refresh).
 const HISTORY: usize = 60;
 
-/// El barrido del banner necesita unos 60 fps. Con el sondeo fijo de 50 ms de
-/// antes se dibujaba a 20 fps y la animación se notaba entrecortada.
+/// The banner sweep needs about 60 fps. The previous fixed 50 ms polling interval rendered
+/// at 20 fps and made the animation look choppy.
 const ANIMATION_TICK: Duration = Duration::from_millis(16);
-/// Mientras gira el spinner basta con unos 12 fps.
+/// About 12 fps is enough while the spinner is active.
 const SPINNER_TICK: Duration = Duration::from_millis(80);
-/// La onda infinita del texto de la cabecera no necesita tanta fluidez como el barrido.
+/// The header's endless wave does not need to be as smooth as the sweep.
 const HEADER_TICK: Duration = Duration::from_millis(33);
-/// Sin animación activa y visible que seguir, se dibuja menos para no gastar CPU.
+/// Draw less often when there is no active, visible animation to save CPU.
 const IDLE_TICK: Duration = Duration::from_millis(100);
 
-/// Entradas del menú de Esc, en orden (la primera es la seleccionada al abrirlo).
+/// Esc-menu entries, in order (the first is selected when the menu opens).
 pub const MENU_ITEMS: [&str; 3] = ["OPTIONS", "HELP", "QUIT"];
 
-/// Ajustes de la pantalla OPTIONS, agrupados en pestañas como en runetui.
+/// OPTIONS-screen settings, grouped into tabs like runetui.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OptionItem {
-    /// Frecuencia de actualización de los datos (como `update_ms` de btop).
+    /// Data update interval (like btop's `update_ms`).
     UpdateInterval,
-    /// Contador de estrellas de GitHub en la cabecera (y única petición de red).
+    /// GitHub star count in the header (and the only network access).
     GithubStars,
     HeaderAnimation,
     BannerAnimation,
@@ -58,12 +58,12 @@ pub enum OptionItem {
 }
 
 impl OptionItem {
-    /// Se cambia con Enter y después con `+` / `-` (o directamente con `+` / `-`).
+    /// Adjust with `Enter` followed by `+` / `-`, or with `+` / `-` directly.
     pub fn is_adjustable(self) -> bool {
         matches!(self, OptionItem::UpdateInterval)
     }
 
-    /// El interruptor de animación que gobierna, si es uno de ellos.
+    /// The animation switch controlled by this option, if any.
     pub fn setting(self) -> Option<Setting> {
         match self {
             OptionItem::HeaderAnimation => Some(Setting::Header),
@@ -85,7 +85,7 @@ pub const OPTION_TABS: [OptionTab; 2] = [
         items: &[OptionItem::UpdateInterval, OptionItem::GithubStars],
     },
     OptionTab {
-        name: "Animaciones",
+        name: "Animations",
         items: &[
             OptionItem::HeaderAnimation,
             OptionItem::BannerAnimation,
@@ -124,31 +124,33 @@ pub struct App {
     pub menu_selected: usize,
     pub menu_opened: Option<Instant>,
     pub start: Instant,
-    /// Ajustes guardados: cada animación se activa o desactiva por separado.
+    /// Persisted settings; each animation can be enabled or disabled independently.
     pub config: Config,
-    /// Dónde se guardan los ajustes (en los tests, un archivo temporal).
+    /// Where settings are stored (a temporary file in tests).
     config_path: PathBuf,
-    /// Pestaña y ajuste seleccionados en la pantalla OPTIONS.
+    /// Selected tab and setting on the OPTIONS screen.
     pub options_tab: usize,
     pub options_selected: usize,
-    /// Estrellas de GitHub del repositorio (se piden en segundo plano; `Off` si están ocultas).
+    /// Repository's GitHub stars (fetched in the background; `Off` when hidden).
     pub stars: Stars,
-    /// Esquina derecha de la cabecera, que el menú no oscurece (la última dibujada).
+    /// Right corner of the header, which the menu does not dim (from the last draw).
     pub header_keep: Option<ratatui::layout::Rect>,
-    /// Se pulsó Enter en un ajuste numérico: `+` / `-` lo cambian hasta Enter o Esc.
+    /// `Enter` was pressed on a numeric setting; `+` / `-` adjust it until `Enter` or `Esc`.
     pub adjusting: bool,
-    /// Cuándo arrancó el texto animado de la cabecera (el barrido vuelve a salir al reactivar).
+    /// When the animated header text started (the sweep restarts when re-enabled).
     header_start: Instant,
-    /// Lo que la última pantalla dibujada dejó ver: el menú grande (con banner) y el
-    /// texto animado de la cabecera. Solo los usa el bucle para decidir la cadencia.
+    /// What was visible in the last rendered frame: the large menu (with banner) and the
+    /// animated header text. The loop uses these only to determine its cadence.
     pub menu_big: bool,
     pub header_fits: bool,
     pub finder: Finder,
+    /// Tunnel selected when the finder opened (`Esc` returns to it).
+    pub search_origin: Option<usize>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
-    /// Id de la última instantánea pedida: sirve para descartar respuestas viejas.
+    /// ID of the last requested snapshot, used to discard stale responses.
     refresh_id: u64,
-    /// Desde cuándo espera la última lectura (None = ya llegó).
+    /// When the last read was requested (`None` = it has arrived).
     refresh_since: Option<Instant>,
     last_refresh: Instant,
     quit: bool,
@@ -157,12 +159,12 @@ pub struct App {
 impl App {
     fn new() -> Self {
         let mut app = Self::with_config(Config::load());
-        app.set_status("Cargando túneles…".into(), Kind::Info);
+        app.set_status("Loading tunnels…".into(), Kind::Info);
         app.refresh();
         app
     }
 
-    /// Estado inicial con unos ajustes dados, sin tocar el disco ni lanzar hilos.
+    /// Initial state with the given settings, without touching disk or spawning threads.
     fn with_config(config: Config) -> Self {
         let (tx, rx) = mpsc::channel();
         App {
@@ -190,6 +192,7 @@ impl App {
             menu_big: false,
             header_fits: true,
             finder: Finder::default(),
+            search_origin: None,
             tx,
             rx,
             refresh_id: 0,
@@ -205,7 +208,7 @@ impl App {
         self.status_at = Instant::now();
     }
 
-    /// El mensaje de estado mientras no haya caducado.
+    /// The status message while it has not expired.
     pub fn visible_status(&self) -> Option<(&str, Kind)> {
         let ttl = if self.status_kind == Kind::Err {
             Duration::from_secs(15)
@@ -228,8 +231,8 @@ impl App {
         self.state.selected().and_then(|i| self.tunnels.get(i))
     }
 
-    /// Cuánto lleva abierto el menú, mientras dure la animación del banner (barrido de luz
-    /// y onda). `None`: banner estático y ya terminado (animación desactivada o acabada).
+    /// How long the menu has been open while the banner animation (light sweep and wave) is
+    /// running. `None`: the banner is static and finished (animation disabled or complete).
     pub fn banner_animation(&self) -> Option<Duration> {
         if !self.config.banner_animation || self.overlay != Overlay::Menu {
             return None;
@@ -239,8 +242,8 @@ impl App {
             .filter(|elapsed| elapsed.as_millis() < u128::from(menu::ANIMATION_MS))
     }
 
-    /// Cuánto lleva abierto el menú, mientras dure su transición de aparición.
-    /// `None`: el menú ya está del todo (o aparece de golpe, con la animación desactivada).
+    /// How long the menu has been open while its entrance transition is running.
+    /// `None`: the menu is fully visible (or appeared instantly with animation disabled).
     pub fn menu_appear(&self) -> Option<Duration> {
         if !self.config.menu_animation || self.overlay != Overlay::Menu {
             return None;
@@ -250,20 +253,20 @@ impl App {
             .filter(|elapsed| elapsed.as_millis() < u128::from(menu::APPEAR_MS))
     }
 
-    /// Cuánto lleva el texto de la cabecera (`None` = quieto, animación desactivada).
+    /// Elapsed time for the header text (`None` = static, animation disabled).
     pub fn header_animation(&self) -> Option<Duration> {
         self.config
             .header_animation
             .then(|| self.header_start.elapsed())
     }
 
-    /// ¿Hay un texto de cabecera animado que se esté viendo?
+    /// Is animated header text currently visible?
     fn header_visible(&self) -> bool {
         self.config.header_animation && self.header_fits
     }
 
-    /// Cadencia del bucle: rápida solo mientras haya una animación activa y visible;
-    /// con todas desactivadas (o fuera de pantalla) vuelve al reposo.
+    /// Loop cadence: fast only while an animation is active and visible; returns to idle when
+    /// all animations are disabled or off-screen.
     fn frame_timeout(&self) -> Duration {
         let banner = self.menu_big && self.banner_animation().is_some();
         let appearing = self.menu_appear().is_some();
@@ -272,7 +275,7 @@ impl App {
         if banner || appearing || header_sweep {
             ANIMATION_TICK
         } else if self.header_visible() {
-            HEADER_TICK // la onda del texto de la cabecera no se acaba nunca
+            HEADER_TICK // The header text's wave never ends.
         } else if self.visible_status().is_some()
             || self.tunnels.iter().any(|t| t.busy.is_some())
         {
@@ -287,8 +290,8 @@ impl App {
         self.scroll = 0;
     }
 
-    /// Pide los datos en un hilo. `wg show all dump` y las lecturas de `/etc/wireguard`
-    /// bloquean: hacerlo en el hilo de dibujo congelaba la animación cada segundo.
+    /// Request data on a worker thread. `wg show all dump` and reads from `/etc/wireguard`
+    /// block; doing this on the draw thread froze the animation every second.
     fn refresh(&mut self) {
         self.refresh_id += 1;
         wg::spawn_refresh(self.refresh_id, self.tx.clone());
@@ -296,17 +299,17 @@ impl App {
         self.refresh_since = Some(self.last_refresh);
     }
 
-    /// ¿Hay una lectura en marcha? Con frecuencias de 100 ms no se apilan hilos si una tarda.
+    /// Is a read in progress? At 100 ms intervals, do not stack threads if a read is slow.
     fn refresh_in_flight(&self) -> bool {
         self.refresh_since.is_some_and(|t| t.elapsed() < REFRESH_STUCK)
     }
 
-    /// ¿Toca la lectura periódica según la frecuencia de actualización elegida?
+    /// Is a periodic read due according to the selected update interval?
     fn refresh_due(&self) -> bool {
         self.last_refresh.elapsed() >= self.config.update_every() && !self.refresh_in_flight()
     }
 
-    /// Coloca una instantánea ya cargada, conservando selección y operaciones en curso.
+    /// Apply a loaded snapshot while preserving the selection and in-progress operations.
     fn apply_snapshot(&mut self, snap: wg::Snapshot) {
         let selected = self.selected().map(|t| t.name.clone());
         let old_idx = self.state.selected();
@@ -334,15 +337,15 @@ impl App {
         }
 
         if self.tunnels.is_empty() {
-            self.set_status(format!("No hay archivos .conf en {WG_DIR}"), Kind::Err);
+            self.set_status(format!("No .conf files found in {WG_DIR}"), Kind::Err);
         }
     }
 
-    /// Velocidad de bajada/subida comparando contadores entre instantáneas, más el
-    /// historial que alimenta la gráfica. `now` es cuando se tomaron los contadores.
+    /// Download/upload speed calculated from counters in successive snapshots, plus the
+    /// history used by the graph. `now` is when the counters were sampled.
     fn update_rates(&mut self, now: Instant) {
-        // Ventana mínima entre dos muestras: 0,5 s como siempre, o la mitad de la frecuencia
-        // elegida si es más corta (así 100 ms sigue dando velocidades y gráfica).
+        // Minimum time between samples: 0.5 s as before, or half the selected interval if
+        // shorter (so 100 ms still produces speed values and a graph).
         let min_dt = (self.config.update_every().as_secs_f64() * 0.5).min(0.5);
         let mut alive: Vec<String> = Vec::new();
         for t in &self.tunnels {
@@ -391,13 +394,13 @@ impl App {
         let Some(i) = self.state.selected() else { return };
         let Some(t) = self.tunnels.get_mut(i) else { return };
         if t.busy.is_some() {
-            return; // ya hay una operación en curso para este túnel
+            return; // An operation is already in progress for this tunnel.
         }
         let up = !t.active;
         t.busy = Some(up);
         let name = t.name.clone();
         self.set_status(
-            format!("{} {}…", if up { "Activando" } else { "Desactivando" }, name),
+            format!("{} {}…", if up { "Enabling" } else { "Disabling" }, name),
             Kind::Info,
         );
         wg::spawn_toggle(name, up, self.tx.clone());
@@ -412,13 +415,13 @@ impl App {
                 }
                 match result {
                     Ok(()) => self.set_status(
-                        format!("{} {}", name, if up { "activada" } else { "desactivada" }),
+                        format!("{} {}", name, if up { "enabled" } else { "disabled" }),
                         Kind::Ok,
                     ),
                     Err(e) => self.set_status(
                         format!(
-                            "Error al {} {}: {e}",
-                            if up { "activar" } else { "desactivar" },
+                            "Error {} {}: {e}",
+                            if up { "enabling" } else { "disabling" },
                             name
                         ),
                         Kind::Err,
@@ -427,20 +430,20 @@ impl App {
                 self.refresh();
             }
             Msg::Snapshot(id, result) => {
-                // Si ya pedimos otra instantánea, esta quedó obsoleta.
+                // This snapshot is stale if a newer one has already been requested.
                 if id != self.refresh_id {
                     return;
                 }
                 self.refresh_since = None;
                 match result {
                     Ok(snap) => self.apply_snapshot(snap),
-                    Err(e) => self.set_status(format!("No puedo leer {WG_DIR}: {e}"), Kind::Err),
+                    Err(e) => self.set_status(format!("Could not read {WG_DIR}: {e}"), Kind::Err),
                 }
             }
         }
     }
 
-    // ------------------------------------------------------------ teclado
+    // ------------------------------------------------------------ keyboard
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
@@ -452,7 +455,7 @@ impl App {
             Overlay::Options => self.options_key(code),
             Overlay::Search => self.search_key(code, mods),
             Overlay::Help => {
-                // Cualquier tecla cierra la ayuda y vuelve al menú (sin repetir la animación).
+                // Any key closes help and returns to the menu without replaying its animation.
                 self.overlay = Overlay::Menu;
                 self.menu_opened = None;
             }
@@ -492,10 +495,10 @@ impl App {
         }
     }
 
-    /// Opciones, como en runetui: pestañas arriba, ajustes a la izquierda y la descripción del
-    /// elegido a la derecha. `↑↓` mueven, `←→` o Tab cambian de pestaña, Enter o Espacio cambian
-    /// el ajuste (en los numéricos, `+` / `-` hasta Enter o Esc). Esc vuelve al menú sin repetir
-    /// su animación.
+    /// Options, like runetui: tabs at the top, settings on the left, and the selected setting's
+    /// description on the right. `↑↓` move, `←→` or `Tab` switch tabs, and `Enter` or `Space`
+    /// toggle a setting (`+` / `-` adjust numeric settings until `Enter` or `Esc`). `Esc`
+    /// returns to the menu without replaying its animation.
     fn options_key(&mut self, code: KeyCode) {
         if self.adjusting {
             match code {
@@ -528,7 +531,7 @@ impl App {
                 self.options_selected = 0;
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_option(self.current_option()),
-            // Como en btop, `+` / `-` también cambian la frecuencia sin pasar por Enter.
+            // As in btop, `+` / `-` also adjust the interval without pressing Enter first.
             KeyCode::Char('+' | '=') if self.current_option().is_adjustable() => {
                 self.adjust_update(true)
             }
@@ -539,7 +542,7 @@ impl App {
         }
     }
 
-    /// El ajuste seleccionado ahora mismo en la pantalla OPTIONS.
+    /// The setting currently selected on the OPTIONS screen.
     pub fn current_option(&self) -> OptionItem {
         let items = OPTION_TABS[self.options_tab.min(OPTION_TABS.len() - 1)].items;
         items[self.options_selected.min(items.len() - 1)]
@@ -553,23 +556,23 @@ impl App {
         }
     }
 
-    /// Muestra u oculta las estrellas. Al ocultarlas no se hace ninguna petición de red.
+    /// Show or hide the stars. No network request is made while they are hidden.
     fn toggle_stars(&mut self) {
         self.config.show_stars = !self.config.show_stars;
         self.stars.set_enabled(self.config.show_stars);
         self.save_config();
     }
 
-    /// Cambia un interruptor de animación y guarda los ajustes.
+    /// Toggle an animation switch and save the settings.
     fn toggle_setting(&mut self, setting: Setting) {
         let on = self.config.toggle(setting);
         if setting == Setting::Header && on {
-            self.header_start = Instant::now(); // el texto vuelve a empezar por el barrido
+            self.header_start = Instant::now(); // Restart the header sweep.
         }
         self.save_config();
     }
 
-    /// Sube (más lenta) o baja (más rápida) la frecuencia de actualización un paso y guarda.
+    /// Increase (slower) or decrease (faster) the update interval by one step and save it.
     fn adjust_update(&mut self, up: bool) {
         let before = self.config.update_ms;
         if self.config.step_update(up) != before {
@@ -580,58 +583,95 @@ impl App {
     fn save_config(&mut self) {
         if let Err(e) = self.config.save_to(&self.config_path) {
             self.set_status(
-                format!("No pude guardar {}: {e}", self.config_path.display()),
+                format!("Could not save {}: {e}", self.config_path.display()),
                 Kind::Err,
             );
         }
     }
 
-    // ------------------------------------------------------------ búsqueda
+    // ------------------------------------------------------------ search
 
     fn open_search(&mut self) {
         self.finder.open();
+        self.search_origin = self.state.selected();
         self.overlay = Overlay::Search;
     }
 
-    /// Teclas del buscador, como las del buscador de archivos de runetui.
+    /// Move the selection to the tunnel matching the query; if the query is empty or has no
+    /// matches, return to the tunnel that was selected when search opened.
+    fn search_follow(&mut self) {
+        let hits = self.finder.hits(&self.tunnels);
+        if self.finder.query.trim().is_empty() || hits.is_empty() {
+            self.search_restore();
+            return;
+        }
+        let sel = self.finder.selected.min(hits.len() - 1);
+        self.finder.selected = sel;
+        self.select(hits[sel].index);
+    }
+
+    fn search_restore(&mut self) {
+        if let Some(origin) = self.search_origin.filter(|o| *o < self.tunnels.len()) {
+            if self.state.selected() != Some(origin) {
+                self.select(origin);
+            }
+        }
+    }
+
+    /// Search in the status bar, like runetui's `/`: typing jumps to the best tunnel; `↑/↓`
+    /// (or `Tab`, `Ctrl+N` / `Ctrl+P`) cycle through matches; `Enter` keeps the selection and
+    /// `Esc` cancels and returns to the previous tunnel.
     fn search_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         let ctrl = mods.contains(KeyModifiers::CONTROL);
         let alt = mods.contains(KeyModifiers::ALT);
-        let hits = self.finder.hits(&self.tunnels);
-        let last = hits.len().saturating_sub(1);
+        let count = self.finder.hits(&self.tunnels).len();
+        let last = count.saturating_sub(1);
         let selected = self.finder.selected.min(last);
         match (code, ctrl) {
-            (KeyCode::Esc, _) => self.overlay = Overlay::None,
+            (KeyCode::Esc, _) => {
+                self.search_restore();
+                self.overlay = Overlay::None;
+            }
             (KeyCode::Enter, _) => {
-                if let Some(hit) = hits.get(selected) {
-                    self.select(hit.index);
+                if count == 0 {
+                    self.search_restore();
                 }
                 self.overlay = Overlay::None;
             }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), true) => {
-                self.finder.selected = (selected + 1).min(last)
+            (KeyCode::Down | KeyCode::Tab, _) | (KeyCode::Char('n'), true) => {
+                if count > 0 {
+                    self.finder.selected = (selected + 1) % count;
+                    self.search_follow();
+                }
             }
-            (KeyCode::Up, _) | (KeyCode::Char('p'), true) => {
-                self.finder.selected = selected.saturating_sub(1)
+            (KeyCode::Up | KeyCode::BackTab, _) | (KeyCode::Char('p'), true) => {
+                if count > 0 {
+                    self.finder.selected = (selected + count - 1) % count;
+                    self.search_follow();
+                }
             }
-            (KeyCode::PageDown, _) => self.finder.selected = (selected + 10).min(last),
-            (KeyCode::PageUp, _) => self.finder.selected = selected.saturating_sub(10),
-            (KeyCode::Home, _) => self.finder.selected = 0,
-            (KeyCode::End, _) => self.finder.selected = last,
-            (KeyCode::Backspace, _) => self.finder.backspace(),
-            (KeyCode::Char('u'), true) => self.finder.clear_query(),
-            (KeyCode::Char('w'), true) => self.finder.delete_word(),
-            // Cualquier otro carácter es texto, `q` incluida: Esc cierra el buscador.
-            (KeyCode::Char(c), false) if !alt => self.finder.type_char(c),
+            (KeyCode::Backspace, _) => {
+                self.finder.backspace();
+                self.search_follow();
+            }
+            (KeyCode::Char('u'), true) => {
+                self.finder.clear_query();
+                self.search_follow();
+            }
+            (KeyCode::Char('w'), true) => {
+                self.finder.delete_word();
+                self.search_follow();
+            }
+            // Any other character is query text, including `q`; `Esc` closes the search.
+            (KeyCode::Char(c), false) if !alt => {
+                self.finder.type_char(c);
+                self.search_follow();
+            }
             _ => {}
         }
     }
 
-    fn list_key(&mut self, code: KeyCode, mods: KeyModifiers) {
-        if code == KeyCode::Char('p') && mods.contains(KeyModifiers::CONTROL) {
-            self.open_search();
-            return;
-        }
+    fn list_key(&mut self, code: KeyCode, _mods: KeyModifiers) {
         match code {
             KeyCode::Char('/') => self.open_search(),
             KeyCode::Esc => self.open_menu(),
@@ -660,8 +700,8 @@ impl App {
         while !self.quit {
             terminal.draw(|f| ui::draw(&mut self, f))?;
 
-            // El timeout se calcula después de dibujar: si esta tecla abrió el menú,
-            // el siguiente fotograma ya corre a 60 fps.
+            // Calculate the timeout after drawing: if this key opened the menu, the next frame
+            // already runs at 60 fps.
             let timeout = self.frame_timeout();
             if event::poll(timeout)? {
                 if let Event::Key(k) = event::read()? {
@@ -705,7 +745,7 @@ mod tests {
         }
     }
 
-    /// App de prueba: ajustes en un archivo temporal propio (nunca toca /etc).
+    /// Test app: settings use a dedicated temporary file (never touches /etc).
     fn app_with(config: Config, tag: &str) -> App {
         let mut app = App::with_config(config);
         app.config_path =
@@ -716,7 +756,7 @@ mod tests {
     fn ago(secs: u64) -> Instant {
         Instant::now()
             .checked_sub(Duration::from_secs(secs))
-            .expect("el reloj monotónico lleva más de unos segundos en marcha")
+            .expect("the monotonic clock has been running for more than a few seconds")
     }
 
     fn press(app: &mut App, code: KeyCode) {
@@ -747,12 +787,12 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         press(&mut app, KeyCode::Enter); // OPTIONS
         assert!(app.overlay == Overlay::Options);
-        press(&mut app, KeyCode::Esc); // vuelve al menú
+        press(&mut app, KeyCode::Esc); // Return to the menu.
         assert!(app.overlay == Overlay::Menu);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter); // HELP
         assert!(app.overlay == Overlay::Help);
-        press(&mut app, KeyCode::Char('x')); // cualquier tecla vuelve
+        press(&mut app, KeyCode::Char('x')); // Any key returns.
         assert!(app.overlay == Overlay::Menu);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter); // QUIT
@@ -769,7 +809,7 @@ mod tests {
         assert_eq!(MENU_ITEMS[app.menu_selected], "OPTIONS");
     }
 
-    /// Abre OPTIONS desde el menú de Esc.
+    /// Open OPTIONS from the Esc menu.
     fn open_options(app: &mut App) {
         press(app, KeyCode::Esc);
         press(app, KeyCode::Enter);
@@ -796,7 +836,7 @@ mod tests {
             OPTION_TABS[0].items,
             &[OptionItem::UpdateInterval, OptionItem::GithubStars]
         );
-        assert_eq!(OPTION_TABS[1].name, "Animaciones");
+        assert_eq!(OPTION_TABS[1].name, "Animations");
         assert_eq!(
             OPTION_TABS[1].items,
             &[
@@ -825,22 +865,24 @@ mod tests {
         press(&mut app, KeyCode::Right);
         assert_eq!(app.options_tab, 1);
         assert_eq!(app.current_option(), OptionItem::HeaderAnimation);
-        press(&mut app, KeyCode::Right); // da la vuelta
+        press(&mut app, KeyCode::Right);
         assert_eq!(app.options_tab, 0);
-        press(&mut app, KeyCode::Left); // y hacia atrás
+        press(&mut app, KeyCode::Right); // Wrap around.
         assert_eq!(app.options_tab, 1);
+        press(&mut app, KeyCode::Left); // And go back.
+        assert_eq!(app.options_tab, 0);
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.options_tab, 0);
+        assert_eq!(app.options_tab, 1);
         press(&mut app, KeyCode::BackTab);
-        assert_eq!(app.options_tab, 1);
-        press(&mut app, KeyCode::Char('h'));
         assert_eq!(app.options_tab, 0);
-        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('h'));
         assert_eq!(app.options_tab, 1);
-        // Cambiar de pestaña vuelve al primer ajuste y no cambia ningún interruptor.
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.options_tab, 0);
+        // Switching tabs returns to the first setting and does not change any switches.
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Left);
-        assert_eq!((app.options_tab, app.options_selected), (0, 0));
+        assert_eq!((app.options_tab, app.options_selected), (1, 0));
         assert_eq!(switches(&app), (true, true, true));
     }
 
@@ -848,7 +890,7 @@ mod tests {
     fn up_down_move_within_the_tab_and_wrap() {
         let mut app = app_with(Config::default(), "options-updown");
         open_options(&mut app);
-        press(&mut app, KeyCode::Down); // General: intervalo y estrellas
+        press(&mut app, KeyCode::Down); // General: interval and stars.
         assert_eq!(app.current_option(), OptionItem::GithubStars);
         press(&mut app, KeyCode::Down);
         assert_eq!(app.current_option(), OptionItem::UpdateInterval);
@@ -874,17 +916,17 @@ mod tests {
         let mut app = app_with(Config::default(), "options-toggle");
         open_options(&mut app);
         press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Enter); // Header
+        press(&mut app, KeyCode::Enter); // Header.
         assert_eq!(switches(&app), (false, true, true));
         press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Char(' ')); // Banner
+        press(&mut app, KeyCode::Char(' ')); // Banner.
         assert_eq!(switches(&app), (false, false, true));
         press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Enter); // Menu
+        press(&mut app, KeyCode::Enter); // Menu.
         assert_eq!(switches(&app), (false, false, false));
-        press(&mut app, KeyCode::Enter); // otra vez: se reactiva
+        press(&mut app, KeyCode::Enter); // Toggle it back on.
         assert_eq!(switches(&app), (false, false, true));
-        // La frecuencia no se toca al cambiar animaciones.
+        // Changing animations does not affect the update interval.
         assert_eq!(app.config.update_ms, 1000);
         cleanup(&app);
     }
@@ -909,14 +951,14 @@ mod tests {
         open_options(&mut app);
         press(&mut app, KeyCode::Enter);
         assert!(app.adjusting);
-        assert_eq!(app.config.update_ms, 1000); // solo entra en modo ajuste
+        assert_eq!(app.config.update_ms, 1000); // Only enter adjustment mode.
         press(&mut app, KeyCode::Enter);
         assert!(!app.adjusting);
         press(&mut app, KeyCode::Char(' '));
         assert!(app.adjusting);
         press(&mut app, KeyCode::Esc);
         assert!(!app.adjusting);
-        assert!(app.overlay == Overlay::Options, "Esc solo termina el ajuste");
+        assert!(app.overlay == Overlay::Options, "Esc only ends adjustment");
     }
 
     #[test]
@@ -938,7 +980,7 @@ mod tests {
         assert_eq!(app.config.update_ms, 1000);
         press(&mut app, KeyCode::Char('-'));
         assert_eq!(app.config.update_ms, 900);
-        assert!(app.adjusting, "sigue ajustando hasta Enter o Esc");
+        assert!(app.adjusting, "adjustment continues until Enter or Esc");
         cleanup(&app);
     }
 
@@ -952,7 +994,7 @@ mod tests {
         press(&mut app, KeyCode::Char('-'));
         assert_eq!(app.config.update_ms, 900);
         assert!(!app.adjusting);
-        // En una animación, + y - no hacen nada.
+        // `+` and `-` have no effect on an animation setting.
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Char('+'));
         press(&mut app, KeyCode::Char('-'));
@@ -994,10 +1036,10 @@ mod tests {
     fn changes_are_saved_right_away_with_all_four_settings() {
         let mut app = app_with(Config::default(), "persist");
         open_options(&mut app);
-        press(&mut app, KeyCode::Char('-')); // 900 ms
+        press(&mut app, KeyCode::Char('-')); // 900 ms.
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Enter); // Banner off
+        press(&mut app, KeyCode::Enter); // Turn the banner off.
         let text = std::fs::read_to_string(&app.config_path).unwrap();
         assert!(text.contains("update_ms = 900"));
         assert!(text.contains("header_animation = on"));
@@ -1013,7 +1055,7 @@ mod tests {
     #[test]
     fn a_failed_save_is_reported_but_the_setting_still_changes() {
         let mut app = app_with(Config::default(), "save-fail");
-        app.config_path = PathBuf::from("/no/existe/wgctui.conf");
+        app.config_path = PathBuf::from("/no/such/wgctui.conf");
         app.overlay = Overlay::Options;
         press(&mut app, KeyCode::Char('+'));
         assert_eq!(app.config.update_ms, 1500);
@@ -1040,14 +1082,14 @@ mod tests {
         assert!(!app.header_animation().is_some_and(menu::header_sweeping));
         open_options(&mut app);
         press(&mut app, KeyCode::Right);
-        press(&mut app, KeyCode::Enter); // off
+        press(&mut app, KeyCode::Enter); // Off.
         assert!(app.header_animation().is_none());
-        press(&mut app, KeyCode::Enter); // on
+        press(&mut app, KeyCode::Enter); // On.
         assert!(app.header_animation().is_some_and(menu::header_sweeping));
         cleanup(&app);
     }
 
-    // ------------------------------------------------------------- estrellas
+    // ------------------------------------------------------------- stars
 
     fn select_stars(app: &mut App) {
         open_options(app);
@@ -1092,8 +1134,8 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert_eq!(switches(&app), (true, true, true));
         assert_eq!(app.config.update_ms, 1000);
-        assert!(!app.adjusting, "no es un ajuste numérico");
-        // Y al revés: cambiar animaciones o frecuencia no toca las estrellas.
+        assert!(!app.adjusting, "this is not a numeric setting");
+        // Conversely, changing animations or the interval does not affect the stars.
         press(&mut app, KeyCode::Right);
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Left);
@@ -1117,7 +1159,7 @@ mod tests {
     fn the_stars_poll_in_the_loop_picks_up_the_count() {
         let mut app = app_with(Config::default(), "stars-poll");
         app.stars.set_for_test(stars::StarsState::Count(7));
-        app.stars.poll(); // sin hilo de fondo no cambia nada
+        app.stars.poll(); // Without a background thread, nothing changes.
         assert_eq!(app.stars.state(), stars::StarsState::Count(7));
     }
 
@@ -1134,7 +1176,7 @@ mod tests {
         cleanup(&app);
     }
 
-    // ------------------------------------------------- frecuencia de actualización
+    // ------------------------------------------------- update interval
 
     #[test]
     fn the_data_is_read_every_second_by_default() {
@@ -1148,7 +1190,7 @@ mod tests {
     fn the_update_interval_decides_when_a_refresh_is_due() {
         let mut app = app_with(Config { update_ms: 20_000, ..Config::default() }, "due-slow");
         app.last_refresh = ago(5);
-        assert!(!app.refresh_due(), "con 20000 ms, 5 s no bastan");
+        assert!(!app.refresh_due(), "5 s is not enough at 20000 ms");
         app.last_refresh = ago(21);
         assert!(app.refresh_due());
 
@@ -1156,7 +1198,7 @@ mod tests {
         app.last_refresh = Instant::now()
             .checked_sub(Duration::from_millis(150))
             .unwrap();
-        assert!(app.refresh_due(), "con 100 ms, 150 ms ya tocan");
+        assert!(app.refresh_due(), "150 ms is enough at a 100 ms interval");
         app.last_refresh = Instant::now();
         assert!(!app.refresh_due());
     }
@@ -1179,11 +1221,11 @@ mod tests {
     fn a_slow_read_is_not_stacked_with_another_one() {
         let mut app = app_with(Config { update_ms: 100, ..Config::default() }, "due-flight");
         app.last_refresh = ago(2);
-        app.refresh_since = Some(ago(1)); // todavía en marcha
+        app.refresh_since = Some(ago(1)); // Still in progress.
         assert!(!app.refresh_due());
-        app.refresh_since = Some(ago(30)); // se dio por perdida
+        app.refresh_since = Some(ago(30)); // Considered stuck.
         assert!(app.refresh_due());
-        app.refresh_since = None; // ya llegó
+        app.refresh_since = None; // It has arrived.
         assert!(app.refresh_due());
     }
 
@@ -1193,8 +1235,8 @@ mod tests {
         app.refresh_id = 7;
         app.refresh_since = Some(Instant::now());
         app.last_refresh = ago(2);
-        // Una respuesta vieja no cuenta.
-        app.on_msg(Msg::Snapshot(6, Err(io::Error::other("vieja"))));
+        // A stale response does not count.
+        app.on_msg(Msg::Snapshot(6, Err(io::Error::other("stale"))));
         assert!(app.refresh_in_flight());
         app.on_msg(Msg::Snapshot(7, Ok(wg::Snapshot { tunnels: Vec::new(), at: Instant::now() })));
         assert!(!app.refresh_in_flight());
@@ -1229,7 +1271,7 @@ mod tests {
         assert!((down - 10_000.0).abs() < 1.0 && (up - 5_000.0).abs() < 1.0, "{down} {up}");
         assert_eq!(fast.history["wg0"].len(), 1);
 
-        // Con 1000 ms (lo de siempre), 100 ms entre muestras es demasiado poco y se espera.
+        // With the default 1000 ms interval, 100 ms between samples is too short.
         let mut normal = app_with(Config::default(), "rate-normal");
         normal.tunnels = vec![tunnel_with_counters(0, 0)];
         normal.update_rates(t0);
@@ -1240,7 +1282,7 @@ mod tests {
         assert!(normal.rates.contains_key("wg0"));
     }
 
-    // ------------------------------------------------- animaciones independientes
+    // ------------------------------------------------- independent animations
 
     #[test]
     fn menu_animations_only_exist_while_the_menu_is_open() {
@@ -1303,7 +1345,7 @@ mod tests {
         assert!(app.banner_animation().is_none() && app.menu_appear().is_none());
     }
 
-    // ------------------------------------------------------------ rendimiento
+    // ------------------------------------------------------------ performance
 
     #[test]
     fn everything_off_goes_back_to_the_idle_cadence() {
@@ -1319,7 +1361,7 @@ mod tests {
         let mut app = app_with(Config { header_animation: true, ..all_off() }, "hdr-rate");
         assert_eq!(app.frame_timeout(), ANIMATION_TICK); // barrido inicial
         app.header_start = ago(30);
-        assert_eq!(app.frame_timeout(), HEADER_TICK); // onda infinita
+        assert_eq!(app.frame_timeout(), HEADER_TICK); // Endless wave.
     }
 
     #[test]
@@ -1332,13 +1374,13 @@ mod tests {
     #[test]
     fn banner_only_runs_fast_while_visible() {
         let mut app = app_with(Config { banner_animation: true, ..all_off() }, "banner-rate");
-        assert_eq!(app.frame_timeout(), IDLE_TICK); // menú cerrado
+        assert_eq!(app.frame_timeout(), IDLE_TICK); // Menu closed.
         press(&mut app, KeyCode::Esc);
-        app.menu_big = false; // menú compacto: no hay banner que ver
+        app.menu_big = false; // Compact menu: no banner is visible.
         assert_eq!(app.frame_timeout(), IDLE_TICK);
         app.menu_big = true;
         assert_eq!(app.frame_timeout(), ANIMATION_TICK);
-        app.menu_opened = Some(ago(10)); // animación terminada
+        app.menu_opened = Some(ago(10)); // Animation finished.
         assert_eq!(app.frame_timeout(), IDLE_TICK);
     }
 
@@ -1354,11 +1396,125 @@ mod tests {
     #[test]
     fn spinners_do_not_depend_on_the_animation_settings() {
         let mut app = app_with(all_off(), "spinner");
-        app.set_status("Activando wg0…".into(), Kind::Info);
+        app.set_status("Enabling wg0…".into(), Kind::Info);
         assert_eq!(app.frame_timeout(), SPINNER_TICK);
         let spinner = app.spinner();
         assert!(!spinner.is_empty());
         let on = app_with(Config::default(), "spinner-on");
         assert_eq!(on.spinner().chars().count(), spinner.chars().count());
+    }
+
+    // ---------------------------------------------------------- inline search
+
+    fn tunnel_named(name: &str) -> Tunnel {
+        Tunnel {
+            name: name.to_string(),
+            active: false,
+            busy: None,
+            conf: String::new(),
+            address: String::new(),
+            endpoint: String::new(),
+            public_key: String::new(),
+            listen_port: String::new(),
+            peers: Vec::new(),
+        }
+    }
+
+    fn searching_app() -> App {
+        let mut app = app_with(all_off(), "search");
+        app.tunnels = ["alpha", "cabin", "jrd", "limestone", "spare"].map(tunnel_named).into_iter().collect();
+        app.state.select(Some(2));
+        app
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(KeyCode::Char(c), NONE);
+        }
+    }
+
+    #[test]
+    fn slash_opens_the_search_and_typing_jumps_to_the_best_match() {
+        let mut app = searching_app();
+        app.on_key(KeyCode::Char('/'), NONE);
+        assert!(app.overlay == Overlay::Search);
+        type_text(&mut app, "lim");
+        assert_eq!(app.state.selected(), Some(3));
+        // `q` is query text, not a quit command.
+        type_text(&mut app, "q");
+        assert!(!app.quit);
+        app.on_key(KeyCode::Backspace, NONE);
+        assert_eq!(app.state.selected(), Some(3));
+    }
+
+    #[test]
+    fn ctrl_f_does_not_open_the_search_and_ctrl_p_does_not_either() {
+        let mut app = searching_app();
+        app.on_key(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(app.overlay == Overlay::None);
+        app.on_key(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(app.overlay == Overlay::None);
+    }
+
+    #[test]
+    fn the_search_only_looks_at_tunnel_names_not_inside_the_config() {
+        let mut app = searching_app();
+        app.tunnels[0].conf = "Endpoint = zzz.example.com:51820".into();
+        app.on_key(KeyCode::Char('/'), NONE);
+        type_text(&mut app, "zzz");
+        assert_eq!(app.state.selected(), Some(2), "without a match, selection stays where it was");
+    }
+
+    #[test]
+    fn enter_keeps_the_found_tunnel_and_esc_goes_back() {
+        let mut app = searching_app();
+        app.on_key(KeyCode::Char('/'), NONE);
+        type_text(&mut app, "spa");
+        app.on_key(KeyCode::Enter, NONE);
+        assert!(app.overlay == Overlay::None);
+        assert_eq!(app.state.selected(), Some(4));
+
+        let mut app = searching_app();
+        app.on_key(KeyCode::Char('/'), NONE);
+        type_text(&mut app, "spa");
+        assert_eq!(app.state.selected(), Some(4));
+        app.on_key(KeyCode::Esc, NONE);
+        assert!(app.overlay == Overlay::None);
+        assert_eq!(app.state.selected(), Some(2), "Esc returns to the previous tunnel");
+    }
+
+    #[test]
+    fn arrows_cycle_through_the_matches() {
+        let mut app = searching_app();
+        app.on_key(KeyCode::Char('/'), NONE);
+        type_text(&mut app, "a"); // alpha, cabin, spare
+        let first = app.state.selected();
+        app.on_key(KeyCode::Down, NONE);
+        let second = app.state.selected();
+        assert_ne!(first, second);
+        app.on_key(KeyCode::Down, NONE);
+        app.on_key(KeyCode::Down, NONE);
+        assert_eq!(app.state.selected(), first, "selection wraps around");
+        app.on_key(KeyCode::Up, NONE);
+        assert_ne!(app.state.selected(), first);
+    }
+
+    #[test]
+    fn the_search_prompt_lives_in_the_status_bar() {
+        let mut app = searching_app();
+        app.on_key(KeyCode::Char('/'), NONE);
+        type_text(&mut app, "li");
+        let backend = ratatui::backend::TestBackend::new(100, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui::draw(&mut app, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row = |y: u16| (0..100u16).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+        let status = row(23);
+        assert!(status.contains("SEARCH"), "{status:?}");
+        assert!(status.contains("/li"), "{status:?}");
+        assert!(status.contains("1/1"), "{status:?}");
+        // There is no longer a floating window over the list.
+        let screen: String = (0..24u16).map(row).collect::<Vec<_>>().join("\n");
+        assert!(!screen.contains("Search tunnel"));
     }
 }

@@ -1,9 +1,9 @@
-//! Ajustes de wgctui.
+//! wgctui configuration.
 //!
-//! El programa siempre acaba corriendo como root (`wg::ensure_root` se relanza con sudo),
-//! así que el archivo vive en /etc y no depende del HOME que deje sudo.
+//! The program always runs as root (`wg::ensure_root` relaunches it with sudo), so the file
+//! lives in /etc and does not depend on the HOME directory inherited by sudo.
 //!
-//! Formato (una clave por línea, `#` para comentarios):
+//! Format (one key per line, `#` for comments):
 //!
 //! ```text
 //! update_ms = 1000
@@ -13,60 +13,60 @@
 //! menu_animation = on
 //! ```
 //!
-//! `update_ms` es la frecuencia de actualización (como en btop): cada cuánto se leen los
-//! datos de WireGuard. Por defecto 1000 ms; de 100 a 20000.
+//! `update_ms` is the update interval (as in btop): how often WireGuard data is read.
+//! The default is 1000 ms; the range is 100 to 20000.
 //!
-//! `show_stars` muestra u oculta el contador de estrellas de GitHub de la cabecera (y con
-//! `off` wgctui no hace ninguna petición de red).
+//! `show_stars` shows or hides the GitHub star count in the header. When set to `off`, wgctui
+//! makes no network requests.
 //!
-//! El parseo es tolerante: claves en mayúsculas o con espacios, líneas rotas o claves
-//! desconocidas se ignoran y lo que falte queda en su valor por defecto (todo activado,
-//! 1000 ms). Un `update_ms` fuera de rango se ajusta al límite más cercano.
-//! La clave antigua `animations` (un único interruptor) sigue entendiéndose: fija los tres
-//! ajustes a la vez, y las claves nuevas que vengan después la sobrescriben.
+//! Parsing is tolerant: uppercase keys, extra whitespace, malformed lines, and unknown keys
+//! are handled gracefully. Missing values keep their defaults (all enabled, 1000 ms). An
+//! out-of-range `update_ms` value is clamped to the nearest limit. The legacy `animations` key
+//! (a single switch) is still supported: it sets all three options, and any newer keys that
+//! follow override it.
 
 use std::{fs, io, path::Path};
 
 pub const CONFIG_PATH: &str = "/etc/wgctui.conf";
 
-/// Frecuencia de actualización por defecto, mínima y máxima (milisegundos).
+/// Default, minimum, and maximum update intervals, in milliseconds.
 pub const DEFAULT_UPDATE_MS: u32 = 1000;
 pub const MIN_UPDATE_MS: u32 = 100;
 pub const MAX_UPDATE_MS: u32 = 20_000;
-/// Hasta `UPDATE_FINE_UNTIL` (incluido) se sube y baja de 100 en 100 ms; por encima, de 500 en 500.
+/// Up to `UPDATE_FINE_UNTIL` (inclusive), step by 100 ms; above it, step by 500 ms.
 const UPDATE_FINE_UNTIL: u32 = 1000;
 const UPDATE_FINE_STEP: u32 = 100;
 const UPDATE_COARSE_STEP: u32 = 500;
 
-/// Siguiente valor de la frecuencia al subirla (más lenta): nunca pasa de `MAX_UPDATE_MS`.
-/// También sirve si el archivo trae un valor que no cae en la rejilla (p. ej. 1234 → 1500).
+/// Next interval when increasing it (slowing down); never exceeds `MAX_UPDATE_MS`.
+/// Also handles values that are not on the step grid (e.g. 1234 → 1500).
 pub fn update_ms_up(ms: u32) -> u32 {
     let step = if ms < UPDATE_FINE_UNTIL { UPDATE_FINE_STEP } else { UPDATE_COARSE_STEP };
     ((ms / step + 1) * step).clamp(MIN_UPDATE_MS, MAX_UPDATE_MS)
 }
 
-/// Siguiente valor al bajarla (más rápida): nunca baja de `MIN_UPDATE_MS`.
+/// Next interval when decreasing it (speeding up); never goes below `MIN_UPDATE_MS`.
 pub fn update_ms_down(ms: u32) -> u32 {
     let step = if ms <= UPDATE_FINE_UNTIL { UPDATE_FINE_STEP } else { UPDATE_COARSE_STEP };
     (ms.saturating_sub(1) / step * step).clamp(MIN_UPDATE_MS, MAX_UPDATE_MS)
 }
 
-/// Cada una de las animaciones que se pueden activar o desactivar por separado.
+/// An animation that can be enabled or disabled independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setting {
-    /// Texto animado de la esquina superior izquierda.
+    /// Animated text in the upper-left corner.
     Header,
-    /// Animación del banner grande del menú de Esc (barrido de luz y onda).
+    /// Large Esc-menu banner animation (light sweep and wave).
     Banner,
-    /// Animación de aparición del propio menú de Esc.
+    /// Esc-menu entrance animation.
     Menu,
 }
 
 impl Setting {
-    /// En el orden en que salen en la pantalla OPTIONS.
+    /// In the order shown on the OPTIONS screen.
     pub const ALL: [Setting; 3] = [Setting::Header, Setting::Banner, Setting::Menu];
 
-    /// Clave en el archivo de configuración.
+    /// Key in the configuration file.
     pub const fn key(self) -> &'static str {
         match self {
             Setting::Header => "header_animation",
@@ -78,9 +78,9 @@ impl Setting {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// Frecuencia de actualización de los datos, en milisegundos (100..=20000).
+    /// Data update interval in milliseconds (100..=20000).
     pub update_ms: u32,
-    /// Contador de estrellas de GitHub arriba a la derecha de la cabecera.
+    /// GitHub star count in the upper-right corner of the header.
     pub show_stars: bool,
     pub header_animation: bool,
     pub banner_animation: bool,
@@ -99,7 +99,7 @@ impl Default for Config {
     }
 }
 
-/// `Some(valor)` si el texto es un sí/no reconocible; `None` si no se entiende.
+/// `Some(value)` if the text is a recognized yes/no value; `None` if it is unrecognized.
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Some(true),
@@ -109,12 +109,12 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 impl Config {
-    /// Frecuencia de actualización como `Duration`.
+    /// Update interval as a `Duration`.
     pub fn update_every(&self) -> std::time::Duration {
         std::time::Duration::from_millis(u64::from(self.update_ms))
     }
 
-    /// Sube (`up`) o baja la frecuencia de actualización un paso y devuelve el nuevo valor.
+    /// Increase (`up`) or decrease the update interval by one step and return the new value.
     pub fn step_update(&mut self, up: bool) -> u32 {
         self.update_ms = if up { update_ms_up(self.update_ms) } else { update_ms_down(self.update_ms) };
         self.update_ms
@@ -136,14 +136,14 @@ impl Config {
         }
     }
 
-    /// Invierte un ajuste y devuelve su nuevo valor.
+    /// Toggle a setting and return its new value.
     pub fn toggle(&mut self, setting: Setting) -> bool {
         let value = !self.get(setting);
         self.set(setting, value);
         value
     }
 
-    /// Lee el archivo; si no existe o está roto, valores por defecto.
+    /// Read the file; use defaults if it is missing or malformed.
     pub fn load() -> Self {
         Self::load_from(CONFIG_PATH)
     }
@@ -166,7 +166,7 @@ impl Config {
             };
             let key = key.trim().to_lowercase();
             if key == "update_ms" {
-                // Número con o sin "ms"; si no se entiende, se queda lo que hubiera.
+                // Accept a number with or without "ms"; keep the previous value if unrecognized.
                 let digits = value.trim().trim_end_matches("ms").trim();
                 if let Ok(ms) = digits.parse::<i64>() {
                     config.update_ms = ms.clamp(i64::from(MIN_UPDATE_MS), i64::from(MAX_UPDATE_MS)) as u32;
@@ -174,12 +174,12 @@ impl Config {
                 continue;
             }
             let Some(value) = parse_bool(value) else {
-                continue; // valor que no se entiende: se queda lo que hubiera
+                continue; // Unrecognized value: keep the previous one.
             };
             if key == "show_stars" {
                 config.show_stars = value;
             } else if key == "animations" {
-                // Clave antigua: un solo interruptor para todo.
+                // Legacy key: a single switch for all animations.
                 for setting in Setting::ALL {
                     config.set(setting, value);
                 }
@@ -241,14 +241,14 @@ mod tests {
 
     #[test]
     fn parsing_is_tolerant() {
-        // Mayúsculas, espacios y distintas formas de decir "no".
+        // Uppercase keys, whitespace, and different ways to express "no".
         assert!(!Config::parse("  header_animation=FALSE ").header_animation);
         assert!(!Config::parse("# wgctui\nbanner_animation = 0\n").banner_animation);
         assert!(!Config::parse("MENU_ANIMATION = No\n").menu_animation);
-        // Valores raros, claves desconocidas y líneas rotas no estropean nada.
-        let c = Config::parse("header_animation = rarísimo\nfoo = off\nsin igual\n= off\n\n");
+        // Unusual values, unknown keys, and malformed lines do not break parsing.
+        let c = Config::parse("header_animation = nonsense\nfoo = off\nno equals\n= off\n\n");
         assert_eq!(c, ALL_ON);
-        // Una línea rota no impide leer las siguientes.
+        // A malformed line does not prevent subsequent lines from being read.
         let c = Config::parse("???\nmenu_animation = off\n");
         assert!(!c.menu_animation);
     }
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn last_value_wins_and_garbage_keeps_the_previous_one() {
         assert!(Config::parse("menu_animation = off\nmenu_animation = on\n").menu_animation);
-        assert!(!Config::parse("menu_animation = off\nmenu_animation = ¿?\n").menu_animation);
+        assert!(!Config::parse("menu_animation = off\nmenu_animation = ???\n").menu_animation);
     }
 
     #[test]
@@ -264,7 +264,7 @@ mod tests {
         let off = Config::parse("animations = off\n");
         assert!(Setting::ALL.into_iter().all(|s| !off.get(s)));
         assert_eq!(Config::parse("animations = on\n"), ALL_ON);
-        // Las claves nuevas posteriores mandan sobre la antigua.
+        // Newer keys take precedence over the legacy key.
         let mixed = Config::parse("animations = off\nbanner_animation = on\n");
         assert_eq!(
             (mixed.header_animation, mixed.banner_animation, mixed.menu_animation),
@@ -285,13 +285,13 @@ mod tests {
         assert_eq!(Config::parse("  UPDATE_MS=5000 ms ").update_ms, 5000);
         assert_eq!(Config::parse("update_ms = 100\n").update_ms, 100);
         assert_eq!(Config::parse("update_ms = 20000\n").update_ms, 20_000);
-        // Fuera de rango: al límite más cercano.
+        // Out of range: clamp to the nearest limit.
         assert_eq!(Config::parse("update_ms = 5\n").update_ms, 100);
         assert_eq!(Config::parse("update_ms = 0\n").update_ms, 100);
         assert_eq!(Config::parse("update_ms = -50\n").update_ms, 100);
         assert_eq!(Config::parse("update_ms = 999999999\n").update_ms, 20_000);
-        // Basura: se ignora y queda lo que hubiera.
-        assert_eq!(Config::parse("update_ms = rápido\n").update_ms, 1000);
+        // Invalid input is ignored; keep the previous value.
+        assert_eq!(Config::parse("update_ms = fast\n").update_ms, 1000);
         assert_eq!(Config::parse("update_ms = 300\nupdate_ms = ???\n").update_ms, 300);
         assert_eq!(Config::parse("update_ms = 1.5\n").update_ms, 1000);
     }
@@ -301,7 +301,7 @@ mod tests {
         let c = Config::parse("update_ms = 2000\nbanner_animation = off\n");
         assert_eq!(c.update_ms, 2000);
         assert_eq!((c.header_animation, c.banner_animation, c.menu_animation), (true, false, true));
-        // La clave antigua no toca la frecuencia.
+        // The legacy key does not affect the interval.
         assert_eq!(Config::parse("update_ms = 300\nanimations = off\n").update_ms, 300);
     }
 
@@ -359,8 +359,8 @@ mod tests {
         assert!(!Config::parse("show_stars = off\n").show_stars);
         assert!(!Config::parse("  SHOW_STARS=False ").show_stars);
         assert!(!Config::parse("show_stars = 0\n").show_stars);
-        // Valor raro: se queda lo que hubiera.
-        assert!(Config::parse("show_stars = quizá\n").show_stars);
+        // An unrecognized value keeps the previous value.
+        assert!(Config::parse("show_stars = maybe\n").show_stars);
         assert!(!Config::parse("show_stars = off\nshow_stars = ???\n").show_stars);
     }
 
@@ -369,7 +369,7 @@ mod tests {
         let c = Config::parse("show_stars = off\n");
         assert_eq!((c.header_animation, c.banner_animation, c.menu_animation), (true, true, true));
         assert_eq!(c.update_ms, 1000);
-        // La clave antigua de las animaciones no toca las estrellas.
+        // The legacy animation key does not affect stars.
         assert!(Config::parse("animations = off\n").show_stars);
         assert!(!Config::parse("show_stars = off\nanimations = on\n").show_stars);
         let c = Config::parse("header_animation = off\nupdate_ms = 400\n");
@@ -420,7 +420,7 @@ mod tests {
         c.save_to(&path).unwrap();
         assert_eq!(Config::load_from(&path), c);
         let _ = fs::remove_file(&path);
-        // Sin archivo: valores por defecto.
+        // Missing file: use defaults.
         assert_eq!(Config::load_from(&path), ALL_ON);
     }
 }

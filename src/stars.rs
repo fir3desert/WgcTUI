@@ -1,13 +1,13 @@
-//! Estrellas de GitHub del repositorio de wgctui, arriba a la derecha de la cabecera.
+//! GitHub stars for the wgctui repository, shown in the header's upper-right corner.
 //!
-//! Es la única petición de red que hace wgctui. Se lanza una vez al arrancar en un hilo de
-//! fondo con el `curl` del sistema, nunca bloquea la interfaz, se guarda en caché una hora y se
-//! puede desactivar con la opción `GitHub stars` (OPTIONS → General) o con `show_stars = off`
-//! en `/etc/wgctui.conf`. Si la petición falla (sin red, sin `curl`, límite de GitHub) la
-//! cabecera enseña un guion.
+//! This is wgctui's only network access. A background thread fetches the count once at startup
+//! using the system `curl`; it never blocks the interface, and the result is cached for one hour.
+//! It can be disabled using the `GitHub stars` option (OPTIONS → General) or `show_stars = off`
+//! in `/etc/wgctui.conf`. If the API request fails (for example, due to rate limiting), the
+//! public repository page is tried instead. If both requests fail, the header shows a dash.
 //!
-//! El programa corre siempre como root, así que la caché vive en /var/cache y no depende del
-//! HOME que deje sudo.
+//! The program always runs as root, so the cache lives in /var/cache and does not depend on
+//! the HOME directory inherited by sudo.
 
 use std::{
     fs,
@@ -18,20 +18,20 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Repositorio cuyas estrellas se muestran.
+/// Repository whose stars are shown.
 pub const REPO: &str = "fir3desert/WgcTUI";
-/// Cuánto se fía de un valor en caché antes de volver a preguntar a GitHub.
+/// How long a cached value is trusted before querying GitHub again.
 const CACHE_TTL: Duration = Duration::from_secs(60 * 60);
-/// Archivo de caché: `"<estrellas> <segundos unix>"`.
+/// Cache file format: `"<stars> <unix timestamp>"`.
 const CACHE_PATH: &str = "/var/cache/wgctui/stars.txt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StarsState {
-    /// Desactivado en las opciones: no se muestra nada ni se hace ninguna petición.
+    /// Disabled in options: show nothing and make no requests.
     Off,
-    /// La petición sigue en marcha y no hay nada en caché.
+    /// The request is in progress and there is no cached value.
     Loading,
-    /// No se pudo obtener el número.
+    /// The count could not be retrieved.
     Unavailable,
     Count(u64),
 }
@@ -43,19 +43,25 @@ pub struct Stars {
 }
 
 impl Stars {
-    /// Empieza a buscar el número si `enabled`. Un valor en caché reciente se usa tal cual; uno
-    /// viejo se muestra mientras se pide el nuevo.
+    /// Start fetching the count if `enabled`. Use a recent cached value as-is; display a stale
+    /// value while requesting an update.
     pub fn start(enabled: bool) -> Self {
         if !enabled {
             return Self::off();
         }
-        // Los tests nunca tocan la red ni la caché real.
+        // Tests never access the network or the real cache.
         if cfg!(test) {
-            return Self { state: StarsState::Loading, receiver: None };
+            return Self {
+                state: StarsState::Loading,
+                receiver: None,
+            };
         }
         let cached = read_cache(Path::new(CACHE_PATH), now());
         if let Some((count, true)) = cached {
-            return Self { state: StarsState::Count(count), receiver: None };
+            return Self {
+                state: StarsState::Count(count),
+                receiver: None,
+            };
         }
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
@@ -72,10 +78,13 @@ impl Stars {
     }
 
     pub fn off() -> Self {
-        Self { state: StarsState::Off, receiver: None }
+        Self {
+            state: StarsState::Off,
+            receiver: None,
+        }
     }
 
-    /// Recoge el resultado de la petición de fondo, si ya llegó.
+    /// Collect the background request result, if it has arrived.
     pub fn poll(&mut self) {
         let Some(receiver) = &self.receiver else {
             return;
@@ -86,7 +95,7 @@ impl Stars {
                 self.receiver = None;
             }
             Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
-                // Mejor un número viejo en caché que cambiarlo por un guion.
+                // A stale cached count is better than replacing it with a dash.
                 if !matches!(self.state, StarsState::Count(_)) {
                     self.state = StarsState::Unavailable;
                 }
@@ -100,7 +109,7 @@ impl Stars {
         self.state
     }
 
-    /// Activa o desactiva la función desde la pantalla de opciones.
+    /// Enable or disable this feature from the options screen.
     pub fn set_enabled(&mut self, enabled: bool) {
         if enabled && self.state == StarsState::Off {
             *self = Self::start(true);
@@ -115,7 +124,7 @@ impl Stars {
     }
 }
 
-/// Texto de la esquina de la cabecera: `★ 42`, `★ 1.2k`… `None` si está desactivado.
+/// Header-corner label: `★ 42`, `★ 1.2k`, etc.; `None` when disabled.
 pub fn label(state: StarsState) -> Option<String> {
     match state {
         StarsState::Off => None,
@@ -138,30 +147,44 @@ fn compact(count: u64) -> String {
     }
 }
 
-/// Saca `stargazers_count` de la respuesta JSON de la API de GitHub.
+/// Extract `stargazers_count` from the GitHub API JSON response.
 pub fn parse_star_count(json: &str) -> Option<u64> {
-    let key = "\"stargazers_count\"";
-    let after = &json[json.find(key)? + key.len()..];
+    parse_count_after_key(json, "\"stargazers_count\"")
+}
+
+/// Extract `stargazerCount` from the JSON embedded in the public repository page.
+fn parse_page_star_count(page: &str) -> Option<u64> {
+    parse_count_after_key(page, "\"stargazerCount\"")
+}
+
+fn parse_count_after_key(text: &str, key: &str) -> Option<u64> {
+    let after = &text[text.find(key)? + key.len()..];
     let after = after.trim_start().strip_prefix(':')?.trim_start();
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
 
 fn fetch_count(repo: &str) -> Option<u64> {
-    let url = format!("https://api.github.com/repos/{repo}");
-    let output = Command::new("curl")
-        .args([
-            "--silent",
-            "--fail",
-            "--location",
-            "--max-time",
-            "6",
-            "--header",
-            "Accept: application/vnd.github+json",
-            "--header",
-            "User-Agent: wgctui",
-            &url,
-        ])
+    let api_url = format!("https://api.github.com/repos/{repo}");
+    fetch_url(&api_url, true)
+        .as_deref()
+        .and_then(parse_star_count)
+        .or_else(|| {
+            let page_url = format!("https://github.com/{repo}");
+            fetch_url(&page_url, false)
+                .as_deref()
+                .and_then(parse_page_star_count)
+        })
+}
+
+fn fetch_url(url: &str, is_api: bool) -> Option<String> {
+    let mut command = Command::new("curl");
+    command.args(["--silent", "--fail", "--location", "--max-time", "6"]);
+    if is_api {
+        command.args(["--header", "Accept: application/vnd.github+json"]);
+    }
+    let output = command
+        .args(["--header", "User-Agent: wgctui", url])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -169,7 +192,7 @@ fn fetch_count(repo: &str) -> Option<u64> {
     if !output.status.success() {
         return None;
     }
-    parse_star_count(&String::from_utf8_lossy(&output.stdout))
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn now() -> u64 {
@@ -178,7 +201,7 @@ fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Valor en caché como `(estrellas, es_reciente)`.
+/// Cached value as `(stars, is_recent)`.
 fn read_cache(path: &Path, now: u64) -> Option<(u64, bool)> {
     let text = fs::read_to_string(path).ok()?;
     let mut parts = text.split_whitespace();
@@ -219,6 +242,14 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_count_from_the_repository_page_as_a_fallback() {
+        let page = r#"{"sidebarAboutData":{"stargazerCount":1,"watcherCount":0}}"#;
+        assert_eq!(parse_page_star_count(page), Some(1));
+        assert_eq!(parse_page_star_count(r#"{"stargazerCount":0}"#), Some(0));
+        assert_eq!(parse_page_star_count(r#"{"stargazerCount":"many"}"#), None);
+    }
+
+    #[test]
     fn rejects_answers_without_a_count() {
         assert_eq!(parse_star_count(""), None);
         assert_eq!(parse_star_count(r#"{"message":"Not Found"}"#), None);
@@ -250,7 +281,10 @@ mod tests {
         assert_eq!(read_cache(&path, 1_000), None);
         write_cache(&path, 77, 1_000);
         assert_eq!(read_cache(&path, 1_000 + 60), Some((77, true)));
-        assert_eq!(read_cache(&path, 1_000 + CACHE_TTL.as_secs() + 1), Some((77, false)));
+        assert_eq!(
+            read_cache(&path, 1_000 + CACHE_TTL.as_secs() + 1),
+            Some((77, false))
+        );
         fs::write(&path, "garbage").unwrap();
         assert_eq!(read_cache(&path, 1_000), None);
         let _ = fs::remove_dir_all(&dir);
@@ -259,19 +293,28 @@ mod tests {
     #[test]
     fn a_failed_request_keeps_the_cached_count() {
         let (sender, receiver) = mpsc::channel();
-        let mut stars = Stars { state: StarsState::Count(9), receiver: Some(receiver) };
+        let mut stars = Stars {
+            state: StarsState::Count(9),
+            receiver: Some(receiver),
+        };
         sender.send(None).unwrap();
         stars.poll();
         assert_eq!(stars.state(), StarsState::Count(9));
 
         let (sender, receiver) = mpsc::channel();
-        let mut stars = Stars { state: StarsState::Loading, receiver: Some(receiver) };
+        let mut stars = Stars {
+            state: StarsState::Loading,
+            receiver: Some(receiver),
+        };
         sender.send(None).unwrap();
         stars.poll();
         assert_eq!(stars.state(), StarsState::Unavailable);
 
         let (sender, receiver) = mpsc::channel();
-        let mut stars = Stars { state: StarsState::Loading, receiver: Some(receiver) };
+        let mut stars = Stars {
+            state: StarsState::Loading,
+            receiver: Some(receiver),
+        };
         sender.send(Some(5)).unwrap();
         stars.poll();
         assert_eq!(stars.state(), StarsState::Count(5));
@@ -280,7 +323,10 @@ mod tests {
     #[test]
     fn a_dropped_worker_means_unavailable() {
         let (sender, receiver) = mpsc::channel::<Option<u64>>();
-        let mut stars = Stars { state: StarsState::Loading, receiver: Some(receiver) };
+        let mut stars = Stars {
+            state: StarsState::Loading,
+            receiver: Some(receiver),
+        };
         drop(sender);
         stars.poll();
         assert_eq!(stars.state(), StarsState::Unavailable);
@@ -299,7 +345,7 @@ mod tests {
         stars.set_enabled(true);
         assert_ne!(stars.state(), StarsState::Off);
         stars.set_for_test(StarsState::Count(3));
-        stars.set_enabled(true); // ya activado: no pierde el número
+        stars.set_enabled(true); // Already enabled: keep the current count.
         assert_eq!(stars.state(), StarsState::Count(3));
         stars.set_enabled(false);
         assert_eq!(stars.state(), StarsState::Off);

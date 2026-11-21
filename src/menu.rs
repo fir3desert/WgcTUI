@@ -1,8 +1,8 @@
-//! Menú de Esc al estilo de runetui: la pantalla de detrás se oscurece (sin borrarse),
-//! y encima aparece el banner en bloques con la animación de apertura (un barrido de luz
-//! en diagonal seguido de una onda brillante), la versión y las palabras del menú.
+//! runetui-style Esc menu: the screen behind it is dimmed (not cleared), with a block-letter
+//! banner and entrance animation (a diagonal light sweep followed by a bright wave), the
+//! version, and the menu entries.
 //!
-//! El banner usa colores de marca fijos: aquí, un degradado rojo.
+//! The banner uses fixed brand colors: a red gradient.
 
 use std::time::Duration;
 
@@ -22,30 +22,30 @@ use crate::{
 
 type Rgb = (u8, u8, u8);
 
-/// Degradado de marca del banner, de arriba a la izquierda a abajo a la derecha.
+/// Banner's brand gradient, from upper-left to lower-right.
 pub const BANNER_TOP: Rgb = (0xff, 0x5a, 0x5f);
 pub const BANNER_BOTTOM: Rgb = (0xb0, 0x1c, 0x3c);
-/// Color de las letras que el barrido todavía no ha alcanzado.
+/// Letter color before the sweep reaches it.
 const UNLIT: Rgb = (70, 70, 84);
-/// Color del borde brillante del barrido.
+/// Bright edge color of the sweep.
 const SWEEP_LIGHT: Rgb = (255, 255, 255);
 
-/// Duración del barrido de luz y de la onda que le sigue.
+/// Duration of the light sweep and the wave that follows it.
 pub const SWEEP_MS: u64 = 900;
 pub const WAVE_MS: u64 = 2600;
-/// Duración total de la animación; después el banner queda estático.
+/// Total animation duration; the banner is static afterward.
 pub const ANIMATION_MS: u64 = SWEEP_MS + WAVE_MS;
-/// Ancho del borde brillante (fracción de la diagonal).
+/// Width of the bright edge (fraction of the diagonal).
 const SWEEP_EDGE: f64 = 0.25;
-/// Una celda es el doble de alta que de ancha: cada fila cuenta como dos columnas
-/// para que la diagonal salga a 45 grados.
+/// A cell is twice as tall as it is wide: count each row as two columns so the diagonal
+/// appears at 45 degrees.
 const ROW_WEIGHT: f64 = 2.0;
-/// Vueltas de la onda, bandas visibles a la vez y brillo de sus valles.
+/// Wave cycles, simultaneously visible bands, and trough brightness.
 const WAVE_CYCLES: f64 = 2.0;
 const WAVE_BANDS: f64 = 1.5;
 const WAVE_TROUGH: f32 = 0.3;
 
-/// Wgc TUI en bloques finos.
+/// Wgc TUI in fine block lettering.
 const BANNER: [&str; 11] = [
     " █████   ███   █████                       ███████████ █████  █████ █████ ",
     "░░███   ░███  ░░███                        ░█░░░███░░░█░░███  ░░███ ░░███ ",
@@ -60,10 +60,10 @@ const BANNER: [&str; 11] = [
     "                                                                           ",
 ];
 
-/// Nombre completo del proyecto, bajo el banner del menú.
+/// Full project name, below the menu banner.
 pub const PRODUCT: &str = "";
 const CREDIT: &str = "Made By - fir3";
-const MENU_HINT: &str = " ↑ / ↓ elegir · Enter abrir · Esc cerrar ";
+const MENU_HINT: &str = " ↑ / ↓ move · Enter open · Esc close ";
 
 fn lerp(from: Rgb, to: Rgb, t: f32) -> Rgb {
     let t = t.clamp(0.0, 1.0);
@@ -71,8 +71,8 @@ fn lerp(from: Rgb, to: Rgb, t: f32) -> Rgb {
     (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
 }
 
-/// Dónde va la animación en `elapsed`: cuánto avanzó el barrido (0.0..=1.0) y la onda como
-/// `(fase, amplitud)`. `None` significa banner estático.
+/// Animation state at `elapsed`: sweep progress (0.0..=1.0) and wave `(phase, amplitude)`.
+/// `None` means the banner is static.
 fn animation_state(elapsed: Option<Duration>) -> (f64, (f64, f64)) {
     let Some(elapsed) = elapsed else {
         return (1.0, (0.0, 0.0));
@@ -84,7 +84,7 @@ fn animation_state(elapsed: Option<Duration>) -> (f64, (f64, f64)) {
         (ms / SWEEP_MS as f64, (0.0, 0.0))
     } else {
         let t = (ms - SWEEP_MS as f64) / WAVE_MS as f64;
-        // Entra y sale suavemente para que el último fotograma sea exactamente el degradado final.
+        // Fade in and out smoothly so the last frame is exactly the final gradient.
         let amplitude = ((t / 0.15).min(1.0) * ((1.0 - t) / 0.25).min(1.0)).max(0.0);
         (1.0, (t * WAVE_CYCLES, amplitude))
     }
@@ -94,8 +94,8 @@ fn banner_width() -> u16 {
     BANNER.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16
 }
 
-/// Color de una celda según su posición en la diagonal (`d`, 0.0..=1.0), lo que ha avanzado
-/// el barrido (`reveal`) y la onda `(fase, amplitud)`.
+/// Cell color based on its diagonal position (`d`, 0.0..=1.0), sweep progress (`reveal`),
+/// and wave `(phase, amplitude)`.
 fn shade(d: f64, reveal: f64, wave: (f64, f64)) -> Color {
     let (phase, amplitude) = wave;
     let finale = lerp(BANNER_TOP, BANNER_BOTTOM, d as f32);
@@ -104,12 +104,12 @@ fn shade(d: f64, reveal: f64, wave: (f64, f64)) -> Color {
     let mut color = if k >= SWEEP_EDGE {
         finale
     } else if k >= 0.0 {
-        lerp(SWEEP_LIGHT, finale, (k / SWEEP_EDGE) as f32) // borde brillante del barrido
+        lerp(SWEEP_LIGHT, finale, (k / SWEEP_EDGE) as f32) // Bright sweep edge.
     } else {
         UNLIT
     };
     if amplitude > 0.0 {
-        // La cresta (el color del degradado) viaja hacia abajo a la derecha.
+        // The crest (the gradient color) travels down and to the right.
         let w = 0.5 + 0.5 * (std::f64::consts::TAU * (d * WAVE_BANDS - phase)).sin();
         let w = (w * w) as f32;
         let dark = lerp((0, 0, 0), color, WAVE_TROUGH);
@@ -118,28 +118,28 @@ fn shade(d: f64, reveal: f64, wave: (f64, f64)) -> Color {
     Color::Rgb(color.0, color.1, color.2)
 }
 
-/// Posición en la diagonal (0.0..=1.0) de la celda `(row, col)` de un bloque `rows` x `width`.
+/// Diagonal position (0.0..=1.0) of cell `(row, col)` in a `rows` x `width` block.
 fn diagonal(row: usize, col: usize, rows: usize, width: usize) -> f64 {
     let span = width as f64 + rows.saturating_sub(1) as f64 * ROW_WEIGHT;
     ((col as f64 + row as f64 * ROW_WEIGHT) / span.max(1.0)).clamp(0.0, 1.0)
 }
 
-/// Color de marca de una celda del banner en el instante de la animación.
+/// Brand color of a banner cell at the given animation time.
 pub fn banner_cell_color(row: usize, col: usize, elapsed: Option<Duration>) -> Color {
     let d = diagonal(row, col, BANNER.len(), banner_width() as usize);
     let (reveal, wave) = animation_state(elapsed);
     shade(d, reveal, wave)
 }
 
-// ------------------------------------------------------- texto de la cabecera
+// ------------------------------------------------------- header text
 
-/// Texto de una sola línea de la esquina superior izquierda (con animación activada).
+/// Single-line text in the upper-left corner (with animation enabled).
 pub const HEADER_TEXT: &str = " WgcTUI ";
-/// Etiqueta fija de siempre (con la animación desactivada).
+/// The usual static label (with animation disabled).
 pub const HEADER_STATIC: &str = " wgctui ";
 
-/// Igual que la animación de Esc (barrido de luz y luego la onda), pero la onda no se
-/// acaba nunca: entra suavemente y sigue girando mientras el programa esté abierto.
+/// Like the Esc-menu animation (light sweep followed by a wave), but the wave never ends:
+/// it fades in and keeps moving while the program is running.
 fn header_state(elapsed: Duration) -> (f64, (f64, f64)) {
     let ms = elapsed.as_secs_f64() * 1000.0;
     if ms <= SWEEP_MS as f64 {
@@ -151,20 +151,20 @@ fn header_state(elapsed: Duration) -> (f64, (f64, f64)) {
     }
 }
 
-/// ¿El texto de la cabecera todavía está en el barrido inicial? (para dibujar a más fotogramas)
+/// Is the header text still in its initial sweep? (Used to render more frames.)
 pub fn header_sweeping(elapsed: Duration) -> bool {
     elapsed.as_millis() < u128::from(SWEEP_MS)
 }
 
-/// Ancho en columnas de lo que ocupa la cabecera a la izquierda en cada modo.
+/// Width, in columns, of the header's left side in each mode.
 pub fn header_width(animated: bool) -> u16 {
     let text = if animated { HEADER_TEXT } else { HEADER_STATIC };
     text.chars().count() as u16
 }
 
-/// El rótulo de la esquina superior izquierda como spans de una línea.
-/// `Some(elapsed)`: texto animado con el degradado rojo de la marca; `None` (animación
-/// desactivada): la etiqueta `" wgctui "` con fondo ACCENT y texto oscuro, sin animar.
+/// Upper-left label as spans on one line.
+/// `Some(elapsed)`: animated text with the brand's red gradient; `None` (animation disabled):
+/// the static `" wgctui "` label with an ACCENT background and dark text.
 pub fn header_label(elapsed: Option<Duration>) -> Vec<Span<'static>> {
     let Some(elapsed) = elapsed else {
         return vec![badge(HEADER_STATIC, ACCENT)];
@@ -184,7 +184,7 @@ pub fn header_label(elapsed: Option<Duration>) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// Letras de 3 filas en doble trazo para las palabras del menú.
+/// Three-row double-stroke lettering for menu entries.
 fn glyph(c: char) -> [&'static str; 3] {
     match c {
         'R' => ["╦═╗", "╠╦╝", "╩╚═"],
@@ -217,11 +217,11 @@ fn word_rows(word: &str) -> [String; 3] {
     rows
 }
 
-// ------------------------------------------------------- fondo oscurecido
+// ------------------------------------------------------- dimmed background
 
-/// Cuánto de su color conserva el fondo mientras hay un menú abierto.
+/// How much of its color the background retains while a menu is open.
 const DIM_KEEP: f32 = 0.42;
-/// Duración de la animación de aparición del menú de Esc.
+/// Duration of the Esc-menu entrance animation.
 pub const APPEAR_MS: u64 = 240;
 
 fn rgb_of(color: Color, fallback: Rgb) -> Rgb {
@@ -237,34 +237,34 @@ fn darken(color: Color, fallback: Rgb, keep: f32) -> Color {
     Color::Rgb(scale(r), scale(g), scale(b))
 }
 
-/// Cuánto ha aparecido el menú (0.0..=1.0) tras `elapsed`. `None` = ya está del todo
-/// (animación del menú desactivada o terminada).
+/// How much of the menu has appeared (0.0..=1.0) after `elapsed`. `None` = fully visible
+/// (menu animation disabled or complete).
 fn appear_amount(elapsed: Option<Duration>) -> f32 {
     let Some(elapsed) = elapsed else {
         return 1.0;
     };
     let t = (elapsed.as_secs_f32() * 1000.0 / APPEAR_MS as f32).clamp(0.0, 1.0);
-    1.0 - (1.0 - t) * (1.0 - t) // frena al final
+    1.0 - (1.0 - t) * (1.0 - t) // Ease out at the end.
 }
 
-/// El color atenuado hacia el fondo oscurecido: con `appear = 1.0` no cambia nada.
+/// Color after dimming toward the background; unchanged when `appear = 1.0`.
 fn fade(color: Color, appear: f32) -> Color {
     if appear >= 1.0 {
         return color;
     }
-    let base = rgb_of(darken(BG, (22, 24, 29), DIM_KEEP), (9, 10, 12));
+    let base = rgb_of(darken(BG, (0, 0, 0), DIM_KEEP), (0, 0, 0));
     let (r, g, b) = lerp(base, rgb_of(color, (214, 218, 228)), appear);
     Color::Rgb(r, g, b)
 }
 
-/// Oscurece todo lo ya dibujado, como btop detrás de su menú: los colores se mezclan
-/// hacia el negro, así la interfaz sigue legible pero queda claramente al fondo.
-/// Con `appear < 1.0` el oscurecido es parcial: así el menú "entra" suavemente.
-/// `keep` es la esquina derecha de la cabecera (contador y estrellas): se queda como está.
+/// Dim everything already drawn, like btop behind its menu: colors blend toward black, leaving
+/// the interface readable but clearly in the background. When `appear < 1.0`, dimming is
+/// partial so the menu fades in smoothly. `keep` is the header's right corner (count and stars),
+/// which remains unchanged.
 fn dim_background(frame: &mut Frame, area: Rect, appear: f32, keep: Option<Rect>) {
     let corner = keep;
     let keep = 1.0 + (DIM_KEEP - 1.0) * appear.clamp(0.0, 1.0);
-    let (fg, bg) = (rgb_of(FG, (214, 218, 228)), rgb_of(BG, (22, 24, 29)));
+    let (fg, bg) = (rgb_of(FG, (214, 218, 228)), rgb_of(BG, (0, 0, 0)));
     let buffer = frame.buffer_mut();
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
@@ -284,7 +284,7 @@ fn centered_x(area: Rect, width: u16) -> u16 {
     area.x + area.width.saturating_sub(width) / 2
 }
 
-/// Pone un carácter sin tocar los huecos: los espacios dejan ver lo que hay detrás.
+/// Place a character without painting over gaps; spaces reveal what is behind them.
 fn put_cell(frame: &mut Frame, x: u16, y: u16, ch: char, style: Style) {
     let area = frame.area();
     if ch == ' ' || x >= area.right() || y >= area.bottom() {
@@ -308,15 +308,15 @@ fn put_text(frame: &mut Frame, x: u16, y: u16, text: &str, style: Style) {
     }
 }
 
-// --------------------------------------------------------------- menú
+// --------------------------------------------------------------- menu
 
-/// Filas que necesita el menú grande: banner, versión, hueco y las palabras de 3 filas
-/// con 1 fila entre ellas.
+/// Rows needed by the large menu: banner, version, spacing, and three-row entries with one
+/// row between them.
 pub const fn big_menu_height() -> u16 {
     BANNER.len() as u16 + 3 + 4 * MENU_ITEMS.len() as u16
 }
 
-/// ¿Cabe el menú grande (con banner) en esta área? Si no, se usa el compacto.
+/// Does the large menu (with banner) fit in this area? If not, use the compact version.
 pub fn fits_big_menu(area: Rect) -> bool {
     area.width >= banner_width() + 4 && area.height >= big_menu_height()
 }
@@ -344,8 +344,8 @@ pub fn render_menu(frame: &mut Frame, area: Rect, app: &App) {
     draw_footer(frame, area, appear);
 }
 
-/// El banner y la versión bajo su borde derecho, con colores de marca fijos.
-/// Con `elapsed` se dibuja la animación en ese instante; `None` dibuja el banner terminado.
+/// Draw the banner and version below its right edge, using fixed brand colors.
+/// `elapsed` selects the animation frame; `None` draws the completed banner.
 fn draw_banner(
     frame: &mut Frame,
     x: u16,
@@ -357,7 +357,7 @@ fn draw_banner(
 ) {
     for (row, line) in BANNER.iter().enumerate() {
         for (col, ch) in line.chars().enumerate() {
-            // La esquina derecha de la cabecera (estrellas) queda por encima del banner.
+            // Keep the header's right corner (stars) above the banner.
             let (cx, cy) = (x + col as u16, top + row as u16);
             if keep.is_some_and(|rect| rect.contains((cx, cy).into())) {
                 continue;
@@ -368,7 +368,7 @@ fn draw_banner(
             put_cell(frame, x + col as u16, top + row as u16, ch, style);
         }
     }
-    // La versión aparece cuando el barrido ya ha iluminado todo el logo.
+    // Show the version once the sweep has illuminated the entire logo.
     let sweep_done = elapsed.is_none_or(|t| t.as_millis() as u64 >= SWEEP_MS);
     if sweep_done {
         let version = format!("v{}", env!("CARGO_PKG_VERSION"));
@@ -392,7 +392,7 @@ fn render_big_menu(
     appear: f32,
     keep: Option<Rect>,
 ) {
-    // Banner, versión, hueco y luego las palabras de 3 filas con 1 fila entre ellas.
+    // Banner, version, spacing, then three-row entries with one row between them.
     let total = big_menu_height();
     let top = area.y + area.height.saturating_sub(total) / 2;
     draw_banner(frame, centered_x(area, banner_w), top, banner_w, elapsed, appear, keep);
@@ -469,7 +469,7 @@ fn framed(title: &str) -> Block<'static> {
     framed_at(title, 1.0)
 }
 
-/// Marco redondeado; con `appear < 1.0` sus colores aún están entrando desde el fondo.
+/// Rounded frame; when `appear < 1.0`, its colors are still fading in from the background.
 fn framed_at(title: &str, appear: f32) -> Block<'static> {
     Block::new()
         .borders(Borders::ALL)
@@ -482,8 +482,8 @@ fn framed_at(title: &str, appear: f32) -> Block<'static> {
         ))
 }
 
-/// Última fila: se limpia (la barra de estado de detrás no debe mezclarse) y lleva
-/// la ayuda de teclas centrada y el crédito a la derecha.
+/// Clear the last row so the status bar behind it does not show through, then center the
+/// keyboard hint and place the credit on the right.
 fn draw_footer(frame: &mut Frame, area: Rect, appear: f32) {
     if area.height < 2 {
         return;
@@ -510,9 +510,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, appear: f32) {
     }
 }
 
-// ------------------------------------------------------------- opciones
+// ------------------------------------------------------------- options
 
-/// Lo que se muestra de un ajuste: nombre, valor (con su color) y descripción.
+/// What is displayed for a setting: label, value (with its color), and description.
 struct OptionText {
     label: &'static str,
     value: String,
@@ -522,9 +522,9 @@ struct OptionText {
 
 fn on_off(on: bool) -> (String, Color) {
     if on {
-        ("ACTIVADA".to_string(), GREEN)
+        ("ON".to_string(), GREEN)
     } else {
-        ("DESACTIVADA".to_string(), FG_MUTED)
+        ("OFF".to_string(), FG_MUTED)
     }
 }
 
@@ -539,10 +539,10 @@ fn option_text(app: &App, item: OptionItem) -> OptionText {
             value: format!("{} ms", app.config.update_ms),
             value_color: YELLOW,
             description: format!(
-                "Cada cuánto se leen los datos de WireGuard (estado, tráfico y gráfica). \
-                 Por defecto 1000 ms; de {MIN_UPDATE_MS} a {MAX_UPDATE_MS}. Menos ms = datos \
-                 más frescos y más CPU.\n\n\
-                 + / − (o Enter y luego + / −): de 100 en 100 ms hasta 1000 y de 500 en 500 después."
+                "How often WireGuard data (status, traffic, and graph) is read. \
+                 Default: 1000 ms; range: {MIN_UPDATE_MS}–{MAX_UPDATE_MS}. Fewer milliseconds \
+                 mean fresher data and higher CPU usage.\n\n\
+                 + / − (or Enter, then + / −): change by 100 ms up to 1000 ms, then by 500 ms."
             ),
         },
         OptionItem::GithubStars => {
@@ -552,33 +552,33 @@ fn option_text(app: &App, item: OptionItem) -> OptionText {
                 value,
                 value_color,
                 description: format!(
-                    "Muestra las estrellas de github.com/{} arriba a la derecha de la \
-                     cabecera. Se consultan una vez por hora en segundo plano con curl y es la \
-                     única petición de red de wgctui; DESACTIVADA las oculta y no hace ninguna.",
+                    "Show stars for github.com/{} in the upper-right corner of the \
+                     header. They are fetched once per hour in the background with curl. This is \
+                     wgctui's only network access; when OFF, they are hidden and no request is made.",
                     crate::stars::REPO
                 ),
             }
         }
         OptionItem::HeaderAnimation => animation(
             "Header animation",
-            "Texto «WGC TUI» animado de la esquina superior izquierda: barrido de luz y onda \
-             infinita. DESACTIVADA: vuelve la etiqueta fija \" wgctui \", sin animar.",
+            "Animated \"WGC TUI\" text in the upper-left corner: a light sweep followed by an \
+             endless wave. OFF: show the static \" wgctui \" label.",
         ),
         OptionItem::BannerAnimation => animation(
             "Banner animation",
-            "Barrido de luz y onda del banner grande del menú de Esc. DESACTIVADA: el banner \
-             se ve ya terminado y estático.",
+            "Light sweep and wave on the large Esc-menu banner. OFF: show the completed, static \
+             banner.",
         ),
         OptionItem::MenuAnimation => animation(
             "Menu animation",
-            "Aparición del propio menú de Esc: el fondo se oscurece y el menú entra con un \
-             fundido. DESACTIVADA: el menú aparece de golpe, sin transición.",
+            "Esc-menu entrance: the background dims and the menu fades in. OFF: show the menu \
+             immediately, without a transition.",
         ),
     }
 }
 
-/// Pantalla de opciones del menú de Esc, como la de runetui: pestañas arriba, los ajustes de
-/// la pestaña a la izquierda y la descripción del seleccionado a la derecha.
+/// Esc-menu options screen, like runetui: tabs at the top, tab settings on the left, and a
+/// description of the selected setting on the right.
 pub fn render_options(frame: &mut Frame, area: Rect, app: &App) {
     if area.width < 30 || area.height < 8 {
         render_menu(frame, area, app);
@@ -599,12 +599,12 @@ pub fn render_options(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
 
-    // Pestañas.
+    // Tabs.
     let tab = app.options_tab.min(OPTION_TABS.len() - 1);
     let mut spans = vec![Span::raw(" ")];
     for (index, entry) in OPTION_TABS.iter().enumerate() {
         let style = if index == tab {
-            Style::new().fg(BG).bg(ACCENT).add_modifier(Modifier::BOLD)
+            Style::new().fg(BADGE_FG).bg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
             Style::new().fg(FG_DIM)
         };
@@ -621,7 +621,7 @@ pub fn render_options(frame: &mut Frame, area: Rect, app: &App) {
     let list = Rect::new(body.x, body.y, list_width, body.height);
     let detail = Rect::new(body.x + list_width, body.y, body.width - list_width, body.height);
 
-    // Ajustes de la pestaña activa.
+    // Active tab settings.
     let items = OPTION_TABS[tab].items;
     let selected = app.options_selected.min(items.len() - 1);
     for (index, item) in items.iter().enumerate() {
@@ -652,7 +652,7 @@ pub fn render_options(frame: &mut Frame, area: Rect, app: &App) {
         frame.render_widget(Paragraph::new(line).style(style), Rect::new(list.x, row, list.width, 1));
     }
 
-    // Descripción del ajuste seleccionado.
+    // Description of the selected setting.
     let text = option_text(app, items[selected]);
     let block = Block::new().borders(Borders::LEFT).border_style(Style::new().fg(BORDER));
     let text_area = block.inner(detail);
@@ -673,15 +673,15 @@ pub fn render_options(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let (hint, color) = if app.adjusting {
-        ("+ / − ajustar · Enter o Esc listo", YELLOW)
+        ("+ / − adjust · Enter or Esc done", YELLOW)
     } else {
-        ("↑↓ mover · ←→ pestaña · Enter cambiar · + / − frecuencia · Esc volver", FG_MUTED)
+        ("↑↓ move · ←→ tabs · Enter toggle · + / − interval · Esc back", FG_MUTED)
     };
     let hint: String = hint.chars().take(inner.width.saturating_sub(2) as usize).collect();
     put_text(frame, inner.x + 1, inner.y + inner.height - 1, &hint, Style::new().fg(color));
 }
 
-// --------------------------------------------------------------- ayuda
+// --------------------------------------------------------------- help
 
 pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     if area.width == 0 || area.height == 0 {
@@ -690,16 +690,16 @@ pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     dim_background(frame, area, 1.0, app.header_keep);
 
     const KEYS: [(&str, &str); 10] = [
-        ("↑ ↓  ·  j k", "Moverte por la lista de túneles"),
-        ("g  ·  G", "Ir al primero / al último"),
-        ("Enter  ·  Espacio", "Activar o desactivar el túnel"),
-        ("/  ·  Ctrl+P", "Buscar túnel (búsqueda difusa)"),
-        ("PgUp  ·  PgDn", "Desplazar el panel de detalle"),
-        ("r", "Refrescar ahora"),
-        ("Esc", "Abrir o cerrar el menú (OPTIONS · HELP · QUIT)"),
-        ("En OPTIONS", "↑ ↓ mover · ← → pestaña · Enter cambiar"),
-        ("+  ·  −", "Frecuencia de actualización (en OPTIONS)"),
-        ("q  ·  Ctrl+C", "Salir (los túneles quedan como estén)"),
+        ("↑ ↓  ·  j k", "Move through the tunnel list"),
+        ("g  ·  G", "Go to the first / last item"),
+        ("Enter  ·  Space", "Enable or disable the tunnel"),
+        ("/", "Search tunnels by name"),
+        ("PgUp  ·  PgDn", "Scroll the details panel"),
+        ("r", "Refresh now"),
+        ("Esc", "Open or close the menu (OPTIONS · HELP · QUIT)"),
+        ("In OPTIONS", "↑ ↓ move · ← → tabs · Enter toggle"),
+        ("+  ·  −", "Update interval (in OPTIONS)"),
+        ("q  ·  Ctrl+C", "Quit (tunnels keep their current state)"),
     ];
 
     let mut lines: Vec<Line<'static>> = vec![
@@ -719,11 +719,11 @@ pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
     }
     lines.push(Line::from(""));
     for note in [
-        "Puedes tener varios túneles activos a la vez.",
-        "★ N: estrellas de GitHub del repo (se ocultan en OPTIONS → General).",
-        "Animaciones (OPTIONS): cabecera, banner y menú, cada una por su",
-        "cuenta. Ajustes y frecuencia (100–20000 ms) en /etc/wgctui.conf.",
-        "Pulsa cualquier tecla para volver.",
+        "Multiple tunnels can be active at the same time.",
+        "★ N: repository's GitHub stars (hide them in OPTIONS → General).",
+        "Animations (OPTIONS): header, banner, and menu work independently.",
+        "Settings and interval (100–20000 ms) are in /etc/wgctui.conf.",
+        "Press any key to return.",
     ] {
         lines.push(Line::from(vec![Span::raw("  "), sp(note, FG_MUTED)]));
     }
@@ -736,7 +736,7 @@ pub fn render_help(frame: &mut Frame, area: Rect, app: &App) {
         width,
         height,
     );
-    let block = framed("AYUDA");
+    let block = framed("HELP");
     frame.render_widget(Clear, rect);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
@@ -780,22 +780,22 @@ mod tests {
             .join("\n")
     }
 
-    /// Columna (en celdas) donde empieza `needle` en la fila `y`.
+    /// Column (in cells) where `needle` starts on row `y`.
     fn col_of(buf: &Buffer, y: u16, needle: &str) -> u16 {
         let row = row_text(buf, y);
-        let byte = row.find(needle).expect("texto no encontrado en la fila");
+        let byte = row.find(needle).expect("text not found on row");
         row[..byte].chars().count() as u16
     }
 
-    /// Fila donde está la primera línea de la palabra grande `word`.
+    /// Row containing the first line of the large word `word`.
     fn word_row(buf: &Buffer, word: &str) -> u16 {
         let needle = &word_rows(word)[0];
         (0..buf.area.height)
             .find(|&y| row_text(buf, y).contains(needle.as_str()))
-            .unwrap_or_else(|| panic!("no está {word}"))
+            .unwrap_or_else(|| panic!("{word} not found"))
     }
 
-    /// Los dos búferes son idénticos salvo la fila de la cabecera (lleva el reloj).
+    /// The buffers are identical except for the header row (which contains the clock).
     fn same_below_header(a: &Buffer, b: &Buffer) -> bool {
         (1..a.area.height).all(|y| (0..a.area.width).all(|x| a[(x, y)] == b[(x, y)]))
     }
@@ -804,7 +804,7 @@ mod tests {
         Instant::now().checked_sub(Duration::from_secs(secs)).unwrap()
     }
 
-    // ---------------------------------------------------------------- cabecera
+    // ---------------------------------------------------------------- header
 
     #[test]
     fn header_is_always_one_row_with_the_list_right_below() {
@@ -814,8 +814,8 @@ mod tests {
             let top = row_text(&buf, 0);
             let second = row_text(&buf, 1);
             assert!(top.contains(HEADER_TEXT.trim()), "{w}x{h}: {top:?}");
-            assert!(!second.contains(HEADER_TEXT.trim()), "{w}x{h}: la cabecera no debe ocupar 2 filas");
-            // La fila 1 ya es el cuerpo (borde del panel), no más cabecera.
+            assert!(!second.contains(HEADER_TEXT.trim()), "{w}x{h}: the header must not take 2 rows");
+            // Row 1 is already the body (panel border), not part of the header.
             assert!(second.contains('┌') || second.contains('╭') || second.contains('│'), "{w}x{h}: {second:?}");
         }
     }
@@ -823,11 +823,11 @@ mod tests {
     #[test]
     fn animated_header_is_one_line_of_gradient_text() {
         let mut app = app_with(Config::default());
-        app.header_start = at_secs(30); // ya en la onda infinita
+        app.header_start = at_secs(30); // Already in the endless wave.
         let buf = render(&mut app, 80, 24);
         let top = row_text(&buf, 0);
         assert!(top.starts_with(HEADER_TEXT), "{top:?}");
-        // Las letras llevan colores de la marca (rojos), no el fondo rojo de la etiqueta fija.
+        // Letters use brand colors (reds), not the static label's red background.
         let mut colors = Vec::new();
         for x in 1..8u16 {
             let cell = &buf[(x, 0)];
@@ -850,7 +850,7 @@ mod tests {
             let colors: Vec<Color> = (1..8u16).map(|x| buf[(x, 0)].fg).collect();
             seen.insert(format!("{colors:?}"));
         }
-        assert!(seen.len() > 1, "la onda debería seguir moviéndose");
+        assert!(seen.len() > 1, "the wave should keep moving");
     }
 
     #[test]
@@ -859,7 +859,7 @@ mod tests {
         app.header_start = Instant::now();
         let first = render(&mut app, 80, 24);
         assert_eq!(first[(1, 0)].fg, Color::Rgb(UNLIT.0, UNLIT.1, UNLIT.2));
-        app.header_start = at_secs(2); // barrido terminado, onda en marcha
+        app.header_start = at_secs(2); // Sweep finished; wave in progress.
         let later = render(&mut app, 80, 24);
         assert_ne!(later[(1, 0)].fg, Color::Rgb(UNLIT.0, UNLIT.1, UNLIT.2));
     }
@@ -872,9 +872,9 @@ mod tests {
         for x in 0..8u16 {
             let cell = &buf[(x, 0)];
             assert_eq!(cell.bg, ACCENT, "x={x}");
-            assert_eq!(cell.fg, BG, "x={x}"); // texto oscuro
+            assert_eq!(cell.fg, BADGE_FG, "x={x}"); // Dark text.
         }
-        // Y no cambia con el tiempo.
+        // It does not change over time.
         let again = render(&mut app, 80, 24);
         assert_eq!(row_text(&buf, 0), row_text(&again, 0));
         assert_eq!(buf[(1, 0)].fg, again[(1, 0)].fg);
@@ -891,7 +891,7 @@ mod tests {
         assert_eq!(fixed as u16, header_width(false));
     }
 
-    // ------------------------------------------------------------------- menú
+    // ------------------------------------------------------------------- menu
 
     #[test]
     fn big_menu_height_needs_fewer_rows_than_with_four_entries() {
@@ -911,10 +911,10 @@ mod tests {
         let text = screen(&buf);
         for word in ["OPTIONS", "HELP", "QUIT"] {
             let first_row = &word_rows(word)[0];
-            assert!(text.contains(first_row.as_str()), "falta {word}");
+            assert!(text.contains(first_row.as_str()), "{word} is missing");
         }
         assert!(!text.contains(word_rows("RESUME")[0].as_str()));
-        // En orden: OPTIONS arriba, luego HELP, luego QUIT.
+        // Order: OPTIONS, then HELP, then QUIT.
         let line_of = |w: &str| {
             let needle = word_rows(w)[0].clone();
             (0..buf.area.height).find(|&y| row_text(&buf, y).contains(&needle)).unwrap()
@@ -924,13 +924,13 @@ mod tests {
 
     #[test]
     fn big_menu_fits_in_the_new_smaller_minimum() {
-        // 26 filas bastan ahora; antes hacían falta 30 para el menú grande.
+        // 26 rows are enough now; the large menu used to need 30.
         let mut app = app_with(all_off());
         app.overlay = Overlay::Menu;
         let text = screen(&render(&mut app, 100, 26));
         assert!(text.contains(word_rows("QUIT")[0].as_str()));
-        assert!(text.contains("█████"), "se ve el banner");
-        // Con 25 filas pasa al menú compacto.
+        assert!(text.contains("█████"), "the banner is visible");
+        // At 25 rows, switch to the compact menu.
         let compact = screen(&render(&mut app, 100, 25));
         assert!(compact.contains("OPTIONS") && compact.contains("HELP") && compact.contains("QUIT"));
         assert!(!compact.contains("RESUME"));
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn options_item_is_selected_by_default_in_both_menus() {
-        // Grande: la palabra seleccionada va en ACCENT y las demás en gris.
+        // Large menu: the selected word uses ACCENT; the others are gray.
         let mut app = app_with(all_off());
         app.overlay = Overlay::Menu;
         let buf = render(&mut app, 100, 30);
@@ -950,7 +950,7 @@ mod tests {
         assert_eq!(colour_of("HELP"), FG_DIM);
         assert_eq!(colour_of("QUIT"), FG_DIM);
 
-        // Compacto: el cursor ❯ está en OPTIONS.
+        // Compact menu: the cursor ❯ is on OPTIONS.
         let buf = render(&mut app, 100, 20);
         let y = (0..20u16).find(|&y| row_text(&buf, y).contains("❯ OPTIONS")).unwrap();
         assert!(row_text(&buf, y).contains("OPTIONS"));
@@ -966,9 +966,9 @@ mod tests {
         app.menu_opened = Some(at_secs(1));
         let b = render(&mut app, 100, 30);
         assert!(same_below_header(&a, &b));
-        // La versión ya está visible bajo el banner.
+        // The version is visible below the banner.
         assert!(screen(&a).contains(&format!("v{}", env!("CARGO_PKG_VERSION"))));
-        // Y el color de una celda del banner es el del degradado final, no el apagado.
+        // A banner cell uses the final gradient color, not the unlit color.
         let (row, col) = (0usize, 2usize);
         let top = (30 - big_menu_height()) / 2;
         let x = (100 - banner_width()) / 2 + col as u16;
@@ -991,11 +991,11 @@ mod tests {
     fn disabled_menu_animation_shows_the_menu_at_once() {
         let mut app = app_with(Config { menu_animation: false, ..all_off() });
         app.overlay = Overlay::Menu;
-        app.menu_opened = Some(Instant::now()); // recién abierto
+        app.menu_opened = Some(Instant::now()); // Just opened.
         let fresh = render(&mut app, 100, 30);
         app.menu_opened = Some(at_secs(10));
         let settled = render(&mut app, 100, 30);
-        // Sin transición: el primer fotograma ya es el definitivo.
+        // No transition: the first frame is already the final one.
         assert!(same_below_header(&fresh, &settled));
     }
 
@@ -1007,22 +1007,22 @@ mod tests {
         let fresh = render(&mut app, 100, 30);
         app.menu_opened = Some(at_secs(10));
         let settled = render(&mut app, 100, 30);
-        assert!(!same_below_header(&fresh, &settled), "al abrir, el menú aún no está del todo");
+        assert!(!same_below_header(&fresh, &settled), "the menu is not fully visible when first opened");
 
-        // Mismo texto, solo cambian los colores.
+        // Same text, only the colors change.
         assert_eq!(
             (1..30u16).map(|y| row_text(&fresh, y)).collect::<Vec<_>>(),
             (1..30u16).map(|y| row_text(&settled, y)).collect::<Vec<_>>()
         );
 
-        // La palabra OPTIONS (ACCENT al final) empieza casi invisible y acaba en ACCENT.
+        // OPTIONS (ACCENT when finished) starts nearly invisible and ends in ACCENT.
         let colour = |buf: &Buffer| {
             let y = word_row(buf, "OPTIONS");
             buf[(col_of(buf, y, &word_rows("OPTIONS")[0]), y)].fg
         };
         assert_eq!(colour(&settled), ACCENT);
         assert_ne!(colour(&fresh), ACCENT);
-        // A mitad de camino queda entre los dos extremos.
+        // Halfway through, it is between the two extremes.
         app.menu_opened = Some(Instant::now().checked_sub(Duration::from_millis(APPEAR_MS / 3)).unwrap());
         let mid = render(&mut app, 100, 30);
         assert_ne!(colour(&mid), colour(&fresh));
@@ -1031,7 +1031,7 @@ mod tests {
 
     #[test]
     fn each_menu_animation_works_without_the_others() {
-        // Solo banner: el banner arranca apagado y el menú no se atenúa (OPTIONS ya en ACCENT).
+        // Banner only: the banner starts unlit and the menu is not dimmed (OPTIONS is already ACCENT).
         let mut app = app_with(Config { banner_animation: true, ..all_off() });
         app.overlay = Overlay::Menu;
         app.menu_opened = Some(Instant::now());
@@ -1042,7 +1042,7 @@ mod tests {
         let x = (100 - banner_width()) / 2 + 2;
         assert_eq!(buf[(x, top)].fg, Color::Rgb(UNLIT.0, UNLIT.1, UNLIT.2));
 
-        // Solo transición del menú: el banner sale terminado (ya con su versión visible).
+        // Menu transition only: the banner is complete and its version is visible.
         let mut app = app_with(Config { menu_animation: true, ..all_off() });
         app.overlay = Overlay::Menu;
         app.menu_opened = Some(Instant::now());
@@ -1066,7 +1066,7 @@ mod tests {
         assert_ne!(fade(ACCENT, 0.0), ACCENT);
     }
 
-    // ---------------------------------------------------------------- opciones
+    // ---------------------------------------------------------------- options
 
     fn options_app(config: Config, tab: usize, selected: usize) -> App {
         let mut app = app_with(config);
@@ -1083,12 +1083,12 @@ mod tests {
             let buf = render(&mut app, 100, 30);
             let y = (0..30u16).find(|&y| row_text(&buf, y).contains("General")).unwrap();
             let row = row_text(&buf, y);
-            assert!(row.contains("General") && row.contains("Animaciones"), "{row:?}");
-            // Solo la pestaña activa lleva el fondo de acento.
+            assert!(row.contains("General") && row.contains("Animations"), "{row:?}");
+            // Only the active tab has the accent background.
             let bg_at = |name: &str| buf[(col_of(&buf, y, name), y)].bg;
-            let names = ["General", "Animaciones"];
+            let names = ["General", "Animations"];
             for (i, name) in names.iter().enumerate() {
-                assert_eq!(bg_at(name) == ACCENT, i == tab, "pestaña {name} (activa: {tab})");
+                assert_eq!(bg_at(name) == ACCENT, i == tab, "tab {name} (active: {tab})");
             }
         }
     }
@@ -1099,10 +1099,10 @@ mod tests {
         let text = screen(&render(&mut app, 100, 30));
         assert!(text.contains("Update interval") && text.contains("1000 ms"), "{text}");
         assert!(text.contains("20000"));
-        assert!(!text.contains("Header animation"), "las animaciones están en su pestaña");
+        assert!(!text.contains("Header animation"), "animations are on their own tab");
     }
 
-    // ---------------------------------------------------------------- estrellas
+    // ---------------------------------------------------------------- stars
 
     fn with_stars(state: crate::stars::StarsState, config: Config) -> App {
         let mut app = app_with(config);
@@ -1117,8 +1117,8 @@ mod tests {
             let mut app = with_stars(Count(1234), Config::default());
             let top = row_text(&render(&mut app, w, h), 0);
             assert!(top.trim_end().ends_with("★ 1.2k"), "{w}x{h}: {top:?}");
-            // Detrás del contador de túneles, con el hueco de margen de siempre.
-            assert!(top.find("activos").unwrap() < top.find('★').unwrap(), "{top:?}");
+            // After the tunnel count, with the usual trailing margin.
+            assert!(top.find("active").unwrap() < top.find('★').unwrap(), "{top:?}");
             assert_eq!(top.chars().last(), Some(' '), "{top:?}");
         }
     }
@@ -1151,25 +1151,25 @@ mod tests {
         app.stars.set_enabled(false);
         let top = row_text(&render(&mut app, 100, 24), 0);
         assert!(!top.contains('★'), "{top:?}");
-        assert!(top.trim_end().ends_with("activos"), "{top:?}");
+        assert!(top.trim_end().ends_with("active"), "{top:?}");
     }
 
     #[test]
     fn stars_are_the_first_thing_dropped_when_the_header_is_tight() {
         let mut app = with_stars(crate::stars::StarsState::Count(42), Config::default());
         let roomy = row_text(&render(&mut app, 60, 24), 0);
-        assert!(roomy.contains('★') && roomy.contains("activos"), "{roomy:?}");
-        // Con una cabecera muy corta se quitan las estrellas y se conserva el contador.
+        assert!(roomy.contains('★') && roomy.contains("active"), "{roomy:?}");
+        // With a very short header, drop the stars but keep the count.
         let mut found_without_stars = false;
         for width in (24..60u16).rev() {
             let top = row_text(&render(&mut app, width, 24), 0);
-            if top.contains("activos") && !top.contains('★') {
+            if top.contains("active") && !top.contains('★') {
                 found_without_stars = true;
                 break;
             }
         }
         assert!(found_without_stars);
-        // Nunca queda una estrella cortada o sola sin su número.
+        // Never leave a star cut off or separated from its number.
         for width in 10..60u16 {
             let top = row_text(&render(&mut app, width, 24), 0);
             if top.contains('★') {
@@ -1192,7 +1192,7 @@ mod tests {
             let x = col_of(&buf, 0, "★ 42");
             assert_eq!((buf[(x, 0)].fg, buf[(x, 0)].bg), (fg_before, bg_before));
             assert!(row_text(&buf, 0).trim_end().ends_with("★ 42"));
-            // El resto de la cabecera sí está oscurecido.
+            // The rest of the header is dimmed.
             assert_ne!(buf[(1, 0)].bg, calm[(1, 0)].bg);
         }
     }
@@ -1224,7 +1224,7 @@ mod tests {
         assert!(text.contains("GitHub stars") && text.contains("Update interval"));
         let y = list_row(&buf, "GitHub stars");
         assert!(row_text(&buf, y).contains("❯ GitHub stars"));
-        assert!(row_text(&buf, y).contains("ACTIVADA"));
+        assert!(row_text(&buf, y).contains("ON"));
         // Heading and description of the selected row.
         assert!(text.contains("fir3desert/WgcTUI"), "{text}");
         assert!(text.contains("curl"));
@@ -1235,7 +1235,7 @@ mod tests {
         let mut app = options_app(Config { show_stars: false, ..Config::default() }, 0, 1);
         let buf = render(&mut app, 100, 24);
         let y = list_row(&buf, "GitHub stars");
-        assert!(row_text(&buf, y).contains("DESACTIVADA"));
+        assert!(row_text(&buf, y).contains("OFF"));
     }
 
     #[test]
@@ -1243,7 +1243,7 @@ mod tests {
         for width in [80u16, 100] {
             let mut app = options_app(Config::default(), 0, 1);
             let text = screen(&render(&mut app, width, 24));
-            assert!(text.contains("ninguna."), "{width}:\n{text}");
+            assert!(text.contains("request is made."), "{width}:\n{text}");
         }
     }
 
@@ -1259,15 +1259,15 @@ mod tests {
     fn adjusting_shows_arrows_around_the_value_and_a_different_hint() {
         let mut app = options_app(Config::default(), 0, 0);
         let calm = screen(&render(&mut app, 100, 30));
-        assert!(calm.contains("Enter cambiar") && !calm.contains('◂'));
+        assert!(calm.contains("Enter toggle") && !calm.contains('◂'));
         app.adjusting = true;
         let buf = render(&mut app, 100, 30);
         let text = screen(&buf);
         assert!(text.contains("◂ 1000 ms ▸"), "{text}");
-        assert!(text.contains("+ / − ajustar") && text.contains("Enter o Esc listo"));
-        assert!(!text.contains("Enter cambiar"));
-        // El aviso de ajuste va en amarillo.
-        let y = (0..30u16).find(|&y| row_text(&buf, y).contains("ajustar")).unwrap();
+        assert!(text.contains("+ / − adjust") && text.contains("Enter or Esc done"));
+        assert!(!text.contains("Enter toggle"));
+        // The adjustment hint is yellow.
+        let y = (0..30u16).find(|&y| row_text(&buf, y).contains("adjust")).unwrap();
         assert_eq!(buf[(col_of(&buf, y, "+ / −"), y)].fg, YELLOW);
     }
 
@@ -1276,22 +1276,22 @@ mod tests {
         let mut app = options_app(Config { banner_animation: false, ..Config::default() }, 1, 0);
         let text = screen(&render(&mut app, 100, 30));
         for name in ["Header animation", "Banner animation", "Menu animation"] {
-            assert!(text.contains(name), "falta {name}");
+            assert!(text.contains(name), "missing {name}");
         }
         assert!(!text.contains("Update interval"));
-        // En la lista (izquierda) hay dos ACTIVADA y una DESACTIVADA; la descripción
-        // de la derecha menciona DESACTIVADA, pero no como valor.
+        // The left list has two ON and one OFF; the right-hand description mentions OFF,
+        // but not as the setting value.
         let value_rows: Vec<&str> = text
             .lines()
             .filter(|l| ["Header animation", "Banner animation", "Menu animation"].iter().any(|n| l.contains(n)))
             .collect();
         assert_eq!(value_rows.len(), 3);
-        let on = value_rows.iter().filter(|l| l.contains(" ACTIVADA")).count();
-        let off = value_rows.iter().filter(|l| l.contains("DESACTIVADA")).count();
+        let on = value_rows.iter().filter(|l| l.contains(" ON")).count();
+        let off = value_rows.iter().filter(|l| l.contains("OFF")).count();
         assert_eq!((on, off), (2, 1));
         let banner = value_rows.iter().find(|l| l.contains("Banner animation")).unwrap();
-        assert!(banner.contains("DESACTIVADA"));
-        // Orden: Header, Banner, Menu.
+        assert!(banner.contains("OFF"));
+        // Order: Header, Banner, Menu.
         let line_of = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap();
         assert!(line_of("Header animation") < line_of("Banner animation"));
         assert!(line_of("Banner animation") < line_of("Menu animation"));
@@ -1310,20 +1310,21 @@ mod tests {
             let x = row[..byte].chars().count() + rest[..at].chars().count();
             buf[(x as u16, y)].fg
         };
-        assert_eq!(colour_of_value("Header animation", "ACTIVADA"), GREEN);
-        assert_eq!(colour_of_value("Menu animation", "DESACTIVADA"), FG_MUTED);
+        assert_eq!(colour_of_value("Header animation", "ON"), GREEN);
+        assert_eq!(colour_of_value("Menu animation", "OFF"), FG_MUTED);
     }
 
-    /// Fila de la lista (izquierda) del ajuste `label`: la que lleva su valor.
+    /// Row in the left-hand list for setting `label`, containing its value.
     fn list_row(buf: &Buffer, label: &str) -> u16 {
         (0..buf.area.height)
             .find(|&y| {
-                // Primer tramo entre divisores = la lista; el segundo, la descripción.
+                // First section between dividers is the list; the second is the description.
                 row_text(buf, y).split('│').nth(1).is_some_and(|list| {
-                    list.contains(label) && (list.contains("ACTIVADA") || list.contains(" ms"))
+                    list.contains(label)
+                        && (list.contains("ON") || list.contains("OFF") || list.contains(" ms"))
                 })
             })
-            .unwrap_or_else(|| panic!("no hay fila para {label}"))
+            .unwrap_or_else(|| panic!("no row found for {label}"))
     }
 
     #[test]
@@ -1344,17 +1345,17 @@ mod tests {
         for (selected, label) in labels.iter().enumerate() {
             let mut app = options_app(Config::default(), 1, selected);
             let buf = render(&mut app, 110, 30);
-            // La primera fila del cuerpo trae, a la derecha del divisor, el título del elegido.
+            // The first body row shows the selected setting's title to the right of the divider.
             let row = row_text(&buf, list_row(&buf, "Header animation"));
             let segments: Vec<&str> = row.split('│').collect();
             assert!(segments[2].contains(label), "item {selected}: {row:?}");
         }
-        // Y el texto de cada descripción es el de la opción.
+        // Each description should match its setting.
         for (item, phrase) in [
-            (OptionItem::HeaderAnimation, "etiqueta fija"),
-            (OptionItem::BannerAnimation, "ya terminado y estático"),
-            (OptionItem::MenuAnimation, "aparece de golpe"),
-            (OptionItem::UpdateInterval, "de 100 en 100 ms"),
+            (OptionItem::HeaderAnimation, "static"),
+            (OptionItem::BannerAnimation, "completed, static"),
+            (OptionItem::MenuAnimation, "show the menu"),
+            (OptionItem::UpdateInterval, "change by 100 ms"),
         ] {
             let app = app_with(Config::default());
             assert!(option_text(&app, item).description.contains(phrase), "{item:?}");
@@ -1366,13 +1367,13 @@ mod tests {
         for (width, height) in [(80u16, 24u16), (100, 24), (120, 30)] {
             let mut app = options_app(Config::default(), 0, 0);
             let text = screen(&render(&mut app, width, height));
-            // La última palabra de la descripción del intervalo tiene que verse entera.
-            assert!(text.contains("después."), "{width}x{height}:\n{text}");
+            // The last word of the interval description must be fully visible.
+            assert!(text.contains("500 ms."), "{width}x{height}:\n{text}");
             for selected in 0..3 {
                 let mut app = options_app(Config::default(), 1, selected);
                 let text = screen(&render(&mut app, width, height));
                     assert!(
-                    text.contains("animar.") || text.contains("estático.") || text.contains("transición."),
+                    text.contains("static") || text.contains("transition."),
                     "{width}x{height} item {selected}:\n{text}"
                 );
             }
@@ -1384,7 +1385,7 @@ mod tests {
         let mut app = options_app(Config::default(), 0, 0);
         let text = screen(&render(&mut app, 100, 30));
         assert!(text.contains("OPTIONS"));
-        assert!(text.contains("↑↓ mover") && text.contains("←→ pestaña") && text.contains("Esc volver"));
+        assert!(text.contains("↑↓ move") && text.contains("←→ tabs") && text.contains("Esc back"));
     }
 
     #[test]
@@ -1392,8 +1393,8 @@ mod tests {
         for tab in 0..2usize {
             let mut app = options_app(Config::default(), tab, 0);
             let text = screen(&render(&mut app, 80, 24));
-            assert!(text.contains("General") && text.contains("Animaciones"));
-            assert!(text.contains("Esc volver"), "tab {tab}");
+            assert!(text.contains("General") && text.contains("Animations"));
+            assert!(text.contains("Esc back"), "tab {tab}");
         }
         let mut app = options_app(Config::default(), 1, 2);
         let text = screen(&render(&mut app, 80, 24));
@@ -1415,12 +1416,12 @@ mod tests {
         let text = screen(&render(&mut app, 100, 30));
         assert!(text.contains("OPTIONS · HELP · QUIT"));
         assert!(text.contains("/etc/wgctui.conf"));
-        assert!(text.contains("Frecuencia de actualización"));
+        assert!(text.contains("Update interval"));
         assert!(text.contains("100–20000 ms"));
         assert!(!text.contains("RESUME"));
     }
 
-    /// Vuelca las pantallas a texto: `cargo test dump_screens -- --ignored --nocapture`.
+    /// Dump screens to text: `cargo test dump_screens -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn dump_screens() {
@@ -1429,23 +1430,23 @@ mod tests {
         };
         let mut app = with_stars(crate::stars::StarsState::Count(1234), Config::default());
         app.header_start = at_secs(30);
-        show("Cabecera con animación activada y estrellas", &mut app, 80, 6);
+        show("Header with animation and stars", &mut app, 80, 6);
         app.config.show_stars = false;
         app.stars.set_enabled(false);
-        show("Cabecera con estrellas ocultas", &mut app, 80, 6);
+        show("Header with stars hidden", &mut app, 80, 6);
         let mut app = app_with(Config { header_animation: false, ..Config::default() });
-        show("Cabecera con animación desactivada", &mut app, 80, 6);
+        show("Header with animation disabled", &mut app, 80, 6);
         let mut app = with_stars(crate::stars::StarsState::Count(42), all_off());
         app.overlay = Overlay::Menu;
-        show("Menú de Esc grande (26 filas)", &mut app, 100, 26);
-        show("Menú de Esc compacto", &mut app, 60, 14);
+        show("Large Esc menu (26 rows)", &mut app, 100, 26);
+        show("Compact Esc menu", &mut app, 60, 14);
         let mut app = options_app(Config::default(), 0, 0);
         show("OPTIONS · General", &mut app, 100, 24);
         app.adjusting = true;
-        show("OPTIONS · General (ajustando)", &mut app, 100, 24);
+        show("OPTIONS · General (adjusting)", &mut app, 100, 24);
         let mut app = options_app(Config { banner_animation: false, ..Config::default() }, 1, 1);
-        show("OPTIONS · Animaciones", &mut app, 100, 24);
-        show("OPTIONS · Animaciones (80x24)", &mut app, 80, 24);
+        show("OPTIONS · Animations", &mut app, 100, 24);
+        show("OPTIONS · Animations (80x24)", &mut app, 80, 24);
         app.overlay = Overlay::Help;
         show("HELP", &mut app, 90, 26);
     }

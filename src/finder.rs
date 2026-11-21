@@ -1,9 +1,9 @@
-//! Buscador de túneles (`/` o `Ctrl+P`), igual que el buscador de archivos de runetui.
+//! Tunnel finder (`/`), like runetui's file finder.
 //!
-//! El algoritmo es el mismo que el de runetui: el texto escrito debe aparecer en orden dentro
-//! del nombre (búsqueda difusa), y puntúa más si las letras van seguidas, si empiezan una
-//! palabra (`_`, `-`, `.`, mayúscula) o si caen en el nombre del archivo. Las letras que
-//! coincidieron se devuelven para poder resaltarlas.
+//! It uses the same algorithm as runetui: the typed text must appear in order within the name
+//! (fuzzy search). Matches score higher when letters are consecutive, start a word (`_`, `-`,
+//! `.`, or uppercase), or fall within the file name. Matched letters are returned for
+//! highlighting.
 
 use std::cmp::Reverse;
 
@@ -219,17 +219,17 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
     Matcher::default().score(&normalize_query(query), candidate)
 }
 
-// ------------------------------------------------------------------ buscador
+// ------------------------------------------------------------------ finder
 
-/// Un túnel que encaja con lo escrito.
+/// A tunnel that matches the query.
 pub struct Hit {
-    /// Posición del túnel en `App::tunnels`.
+    /// Position of the tunnel in `App::tunnels`.
     pub index: usize,
-    /// Letras (por carácter, no por byte) del nombre que coincidieron.
+    /// Character (not byte) indexes of matching letters in the name.
     pub positions: Vec<usize>,
 }
 
-/// Estado del cuadro de búsqueda: lo escrito y el resultado marcado.
+/// Search state: the query and the selected result.
 #[derive(Default)]
 pub struct Finder {
     pub query: String,
@@ -257,7 +257,7 @@ impl Finder {
         self.selected = 0;
     }
 
-    /// Borra la última palabra (`Ctrl+W`).
+    /// Delete the last word (`Ctrl+W`).
     pub fn delete_word(&mut self) {
         let trimmed = self.query.trim_end().len();
         self.query.truncate(trimmed);
@@ -271,9 +271,9 @@ impl Finder {
         self.selected = 0;
     }
 
-    /// Túneles que encajan, el mejor primero. Con la búsqueda vacía salen todos, en su
-    /// orden, sin letras resaltadas. Se recalcula cada vez: son pocos y así siempre
-    /// refleja la lista actual (que se refresca cada segundo).
+    /// Matching tunnels, best first. An empty query returns all tunnels in their original order
+    /// without highlighted letters. This is recalculated each time; there are few tunnels, and
+    /// this keeps results in sync with the list, which refreshes every second.
     pub fn hits(&self, tunnels: &[Tunnel]) -> Vec<Hit> {
         let query = normalize_query(&self.query);
         if query.is_empty() {
@@ -426,7 +426,7 @@ mod tests {
         for character in "ofi".chars() {
             finder.type_char(character);
         }
-        // Los dos con "ofi"; el más corto (mismo puntaje) va primero.
+        // Both match "ofi"; the shorter one ranks first when scores are equal.
         assert_eq!(names(&finder, &tunnels), vec!["oficina", "oficina-madrid"]);
         finder.clear_query();
         for character in "xyz".chars() {

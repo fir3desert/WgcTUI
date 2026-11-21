@@ -1,4 +1,4 @@
-//! Dibujo de la pantalla principal: cabecera, lista, detalle y barra de estado.
+//! Main screen rendering: header, list, details, and status bar.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
     wg::{self, Tunnel, WG_DIR},
 };
 
-// ---------------------------------------------------------------- formato
+// ---------------------------------------------------------------- formatting
 
 fn fmt_bytes(n: u64) -> String {
     const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -39,7 +39,7 @@ fn fmt_rate(bps: f64) -> String {
 
 fn fmt_ago(ts: u64) -> (String, Color) {
     if ts == 0 {
-        return ("nunca".into(), RED);
+        return ("never".into(), RED);
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -47,13 +47,13 @@ fn fmt_ago(ts: u64) -> (String, Color) {
         .unwrap_or(0);
     let s = now.saturating_sub(ts);
     let txt = if s < 60 {
-        format!("hace {s} s")
+        format!("{s}s ago")
     } else if s < 3600 {
-        format!("hace {} min", s / 60)
+        format!("{}m ago", s / 60)
     } else if s < 86400 {
-        format!("hace {} h", s / 3600)
+        format!("{}h ago", s / 3600)
     } else {
-        format!("hace {} d", s / 86400)
+        format!("{}d ago", s / 86400)
     };
     (txt, if s < 180 { GREEN } else { YELLOW })
 }
@@ -69,7 +69,7 @@ fn short_key(k: &str) -> String {
     }
 }
 
-/// Mini gráfica de barras con las últimas muestras.
+/// Mini bar chart of recent samples.
 fn spark(vals: &[f64], width: usize) -> String {
     const L: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
     let take = vals.len().min(width);
@@ -87,7 +87,7 @@ fn text_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
-/// Une los grupos izquierdo y derecho de una barra; si no caben, se descarta el derecho.
+/// Join the left and right groups of a bar; discard the right group if they do not fit.
 fn bar_line(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) -> Line<'static> {
     let (lw, rw) = (text_width(&left), text_width(&right));
     let mut spans = left;
@@ -98,17 +98,17 @@ fn bar_line(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: u16) -> 
     Line::from(spans)
 }
 
-// ------------------------------------------------------------------ draw
+// ------------------------------------------------------------------ drawing
 
 pub fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     f.render_widget(Block::new().style(Style::new().bg(BG).fg(FG)), area);
 
-    // Lo que ve el usuario decide la cadencia del bucle (ver `App::frame_timeout`).
+    // The visible UI determines the loop cadence (see `App::frame_timeout`).
     app.menu_big = menu::fits_big_menu(area);
     app.header_fits = area.width >= menu::header_width(true);
 
-    // La cabecera mide siempre 1 fila.
+    // The header is always one row high.
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -126,18 +126,19 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         Overlay::Menu => menu::render_menu(f, area, app),
         Overlay::Options => menu::render_options(f, area, app),
         Overlay::Help => menu::render_help(f, area, app),
-        Overlay::Search => draw_search(app, f, area),
+        // Search is rendered in the status bar (see `draw_status`).
+        Overlay::Search => {}
     }
 }
 
-/// Dibuja la cabecera y devuelve dónde quedó su grupo de la derecha (contador de túneles y
-/// estrellas), que el menú de Esc deja sin oscurecer; `None` si no cupo.
+/// Draw the header and return the location of its right-hand group (tunnel count and stars),
+/// which the Esc menu leaves undimmed; return `None` if it does not fit.
 fn draw_header(app: &App, f: &mut Frame, area: Rect) -> Option<Rect> {
     let active = app.tunnels.iter().filter(|t| t.active).count();
     let total = app.tunnels.len();
     f.render_widget(Block::new().style(Style::new().bg(BG_ALT).fg(FG_DIM)), area);
 
-    // Una sola línea: el rótulo (animado o la etiqueta fija) y, a su derecha, el túnel elegido.
+    // One line: the (animated or static) label and, to its right, the selected tunnel.
     let bar = area;
     let mut left = menu::header_label(app.header_animation());
     if let Some(t) = app.selected() {
@@ -145,14 +146,14 @@ fn draw_header(app: &App, f: &mut Frame, area: Rect) -> Option<Rect> {
         left.push(sp(t.name.clone(), FG_DIM));
     }
     let count = Span::styled(
-        format!(" {active}/{total} activos "),
+        format!(" {active}/{total} active "),
         Style::new()
             .fg(if active > 0 { GREEN } else { FG_MUTED })
             .bg(BG_SEL)
             .add_modifier(ratatui::style::Modifier::BOLD),
     );
-    // Contador de túneles y, en el extremo derecho, las estrellas de GitHub (con un hueco de
-    // margen detrás). Si no caben, las estrellas son lo primero que se quita.
+    // Tunnel count and, at the far right, GitHub stars (with a trailing margin). If they do not
+    // fit, the stars are removed first.
     let stars = stars::label(app.stars.state()).map(|label| {
         Span::styled(
             format!("  {label}"),
@@ -181,7 +182,7 @@ fn draw_header(app: &App, f: &mut Frame, area: Rect) -> Option<Rect> {
         bar,
     );
 
-    // Reloj centrado, solo si no toca ninguno de los lados.
+    // Center the clock only if it does not overlap either side.
     let clock = format!(" {} ", wg::clock());
     let cw = clock.chars().count() as u16;
     let x = area.x + area.width.saturating_sub(cw) / 2;
@@ -203,33 +204,59 @@ fn draw_status(app: &App, f: &mut Frame, area: Rect) {
     let (badge_txt, badge_col) = match status {
         Some((_, Kind::Ok)) => (" ✔ OK ".to_string(), GREEN),
         Some((_, Kind::Err)) => (" ✘ ERROR ".to_string(), RED),
-        Some((_, Kind::Info)) => (format!(" {} TRABAJANDO ", app.spinner()), YELLOW),
-        None if any_busy => (format!(" {} TRABAJANDO ", app.spinner()), YELLOW),
-        None => (" TÚNELES ".to_string(), ACCENT),
+        Some((_, Kind::Info)) => (format!(" {} WORKING ", app.spinner()), YELLOW),
+        None if any_busy => (format!(" {} WORKING ", app.spinner()), YELLOW),
+        None => (" TUNNELS ".to_string(), ACCENT),
+    };
+    let searching = app.overlay == Overlay::Search;
+    let (badge_txt, badge_col) = if searching {
+        (" SEARCH ".to_string(), ACCENT)
+    } else {
+        (badge_txt, badge_col)
     };
     let mut left = vec![badge(badge_txt, badge_col)];
-    if let Some((msg, kind)) = status {
+    let mut found: Option<(usize, usize)> = None;
+    if searching {
+        // Like runetui's `/` search: type the query directly in the bar.
+        left.push(sp("  /", YELLOW));
+        left.push(bold(app.finder.query.clone(), FG));
+        left.push(sp("▏", ACCENT));
+        if app.finder.query.is_empty() {
+            left.push(sp(" type to search tunnels", FG_MUTED));
+        } else {
+            let total = app.finder.hits(&app.tunnels).len();
+            found = Some((app.finder.selected.min(total.saturating_sub(1)) + 1, total));
+        }
+    } else if let Some((msg, kind)) = status {
         let color = if kind == Kind::Err { RED } else { FG_DIM };
         left.push(sp(format!("  {msg}"), color));
     } else if let Some(t) = app.selected() {
         left.push(sp(format!("  {}", t.name), FG_DIM));
     }
 
-    // Atajos: se quitan de derecha a izquierda si no caben.
+    // Hints are removed from right to left if they do not fit.
+    const SEARCH_HINTS: [(&str, &str); 3] = [("↑↓", "next"), ("⏎", "go"), ("Esc", "cancel")];
     const HINTS: [(&str, &str); 7] = [
-        ("↑↓", "mover"),
-        ("⏎", "alternar"),
-        ("/", "buscar"),
-        ("PgUp/PgDn", "detalle"),
-        ("r", "refrescar"),
-        ("Esc", "menú"),
-        ("q", "salir"),
+        ("↑↓", "move"),
+        ("⏎", "toggle"),
+        ("/", "search"),
+        ("PgUp/PgDn", "details"),
+        ("r", "refresh"),
+        ("Esc", "menu"),
+        ("q", "quit"),
     ];
+    let hints: &[(&str, &str)] = if searching { &SEARCH_HINTS } else { &HINTS };
+    // Match counter, like runetui's `1/34`.
+    let counter: Vec<Span<'static>> = match found {
+        Some((_, 0)) => vec![sp(" no matches ", RED)],
+        Some((cur, total)) => vec![sp(format!(" {cur}/{total} "), YELLOW)],
+        None => Vec::new(),
+    };
     let lw = text_width(&left);
     let mut right: Vec<Span<'static>> = Vec::new();
-    for n in (0..=HINTS.len()).rev() {
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        for (key, label) in HINTS.iter().take(n) {
+    for n in (0..=hints.len()).rev() {
+        let mut spans: Vec<Span<'static>> = counter.clone();
+        for (key, label) in hints.iter().take(n) {
             spans.push(bold(*key, FG));
             spans.push(sp(format!(" {label}  "), FG_MUTED));
         }
@@ -253,7 +280,7 @@ fn draw_body(app: &mut App, f: &mut Frame, area: Rect) {
     draw_detail(app, f, cols[1]);
 }
 
-// ------------------------------------------------------------ lista
+// ------------------------------------------------------------ list
 
 fn draw_list(app: &mut App, f: &mut Frame, area: Rect) {
     let block = Block::new()
@@ -266,7 +293,7 @@ fn draw_list(app: &mut App, f: &mut Frame, area: Rect) {
 
     let active = app.tunnels.iter().filter(|t| t.active).count();
     f.render_widget(
-        Paragraph::new(Line::from(bold(" TÚNELES", FG_MUTED))),
+        Paragraph::new(Line::from(bold(" TUNNELS", FG_MUTED))),
         parts[0],
     );
     f.render_widget(
@@ -284,7 +311,7 @@ fn draw_list(app: &mut App, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
-                Line::from(sp(format!(" No hay archivos .conf en {WG_DIR}"), FG_MUTED)),
+                Line::from(sp(format!(" No .conf files found in {WG_DIR}"), FG_MUTED)),
             ]),
             parts[1],
         );
@@ -293,18 +320,36 @@ fn draw_list(app: &mut App, f: &mut Frame, area: Rect) {
 
     let width = parts[1].width as usize;
     let sel = app.state.selected();
+    // When search is open, matching letters are highlighted and non-matches are dimmed.
+    let hits = if app.overlay == Overlay::Search && !app.finder.query.trim().is_empty() {
+        Some(app.finder.hits(&app.tunnels))
+    } else {
+        None
+    };
     let items: Vec<ListItem> = app
         .tunnels
         .iter()
         .enumerate()
-        .map(|(i, t)| tunnel_item(app, t, Some(i) == sel, width))
+        .map(|(i, t)| {
+            let found = hits
+                .as_ref()
+                .map(|h| h.iter().find(|hit| hit.index == i).map(|hit| hit.positions.as_slice()));
+            tunnel_item(app, t, Some(i) == sel, width, found)
+        })
         .collect();
     let list = List::new(items).highlight_style(Style::new().bg(BG_SEL));
     f.render_stateful_widget(list, parts[1], &mut app.state);
 }
 
-fn tunnel_item(app: &App, t: &Tunnel, selected: bool, width: usize) -> ListItem<'static> {
-    // Barra de selección, como en el explorador de runetui.
+/// `found`: `None` = not searching; `Some(None)` = no match; `Some(Some(letters))` = match.
+fn tunnel_item(
+    app: &App,
+    t: &Tunnel,
+    selected: bool,
+    width: usize,
+    found: Option<Option<&[usize]>>,
+) -> ListItem<'static> {
+    // Selection bar, like runetui's file finder.
     let bar = if selected { sp("▍", ACCENT) } else { Span::raw(" ") };
 
     let (icon, icon_col) = match (t.busy, t.active) {
@@ -313,38 +358,39 @@ fn tunnel_item(app: &App, t: &Tunnel, selected: bool, width: usize) -> ListItem<
         (None, false) => ("○", FG_MUTED),
     };
     let badge_span = match (t.busy, t.active) {
-        (Some(true), _) => badge(" activando ", YELLOW),
-        (Some(false), _) => badge(" desactivando ", YELLOW),
-        (None, true) => badge(" ACTIVA ", GREEN),
-        (None, false) => sp(" inactiva ", FG_MUTED),
+        (Some(true), _) => badge(" enabling ", YELLOW),
+        (Some(false), _) => badge(" disabling ", YELLOW),
+        (None, true) => badge(" ACTIVE ", GREEN),
+        (None, false) => sp(" inactive ", FG_MUTED),
     };
-    let name_span = if t.active {
-        bold(t.name.clone(), FG)
+    let base = if t.active {
+        Style::new().fg(FG).add_modifier(Modifier::BOLD)
     } else {
-        sp(t.name.clone(), FG_DIM)
+        Style::new().fg(FG_DIM)
+    };
+    let name_spans_vec: Vec<Span<'static>> = match found {
+        None => vec![Span::styled(t.name.clone(), base)],
+        Some(None) => vec![Span::styled(t.name.clone(), Style::new().fg(FG_MUTED))],
+        Some(Some(pos)) => name_spans(&t.name, pos, base),
     };
 
-    // barra + espacio + icono + espacio + nombre ... badge + margen
+    // bar + space + icon + space + name ... badge + margin
     let left_len = 4 + t.name.chars().count();
     let badge_len = badge_span.content.chars().count();
     let pad = width.saturating_sub(left_len + badge_len + 1).max(1);
 
-    let line1 = Line::from(vec![
-        bar.clone(),
-        Span::raw(" "),
-        sp(icon, icon_col),
-        Span::raw(" "),
-        name_span,
-        Span::raw(" ".repeat(pad)),
-        badge_span,
-    ]);
+    let mut first = vec![bar.clone(), Span::raw(" "), sp(icon, icon_col), Span::raw(" ")];
+    first.extend(name_spans_vec);
+    first.push(Span::raw(" ".repeat(pad)));
+    first.push(badge_span);
+    let line1 = Line::from(first);
 
     let mut detail: Vec<Span<'static>> = vec![bar.clone(), Span::raw("   ")];
     if t.busy.is_some() {
-        detail.push(sp("trabajando…", FG_MUTED));
+        detail.push(sp("working…", FG_MUTED));
     } else if t.active {
         if t.last_handshake() == 0 {
-            detail.push(sp("esperando handshake…", YELLOW));
+            detail.push(sp("waiting for handshake…", YELLOW));
         } else {
             let (rx, tx) = app.rates.get(&t.name).copied().unwrap_or((0.0, 0.0));
             detail.push(sp("↓ ", DOWN));
@@ -362,11 +408,11 @@ fn tunnel_item(app: &App, t: &Tunnel, selected: bool, width: usize) -> ListItem<
         }
         let joined = parts.join("  ·  ");
         let txt = if parts.is_empty() {
-            "sin datos".to_string()
+            "no data".to_string()
         } else if joined.chars().count() + 5 <= width {
             joined
         } else {
-            parts[0].clone() // si no cabe, solo la dirección
+            parts[0].clone() // If it does not fit, show only the address.
         };
         detail.push(sp(txt, FG_MUTED));
     }
@@ -374,7 +420,7 @@ fn tunnel_item(app: &App, t: &Tunnel, selected: bool, width: usize) -> ListItem<
     ListItem::new(vec![line1, Line::from(detail), Line::from(bar)])
 }
 
-// ---------------------------------------------------------- detalle
+// ---------------------------------------------------------- details
 
 fn draw_detail(app: &mut App, f: &mut Frame, area: Rect) {
     let inner = area.inner(Margin {
@@ -388,18 +434,18 @@ fn draw_detail(app: &mut App, f: &mut Frame, area: Rect) {
     ])
     .split(inner);
 
-    // Cabecera del panel: nombre y estado.
+    // Panel header: name and status.
     let caption = match app.selected() {
         Some(t) => {
             let state = match (t.busy, t.active) {
-                (Some(true), _) => badge(" ACTIVANDO ", YELLOW),
-                (Some(false), _) => badge(" DESACTIVANDO ", YELLOW),
-                (None, true) => badge(" ACTIVA ", GREEN),
-                (None, false) => Span::styled(" INACTIVA ", Style::new().fg(FG_MUTED).bg(BG_SEL)),
+                (Some(true), _) => badge(" ENABLING ", YELLOW),
+                (Some(false), _) => badge(" DISABLING ", YELLOW),
+                (None, true) => badge(" ACTIVE ", GREEN),
+                (None, false) => Span::styled(" INACTIVE ", Style::new().fg(FG_MUTED).bg(BG_SEL)),
             };
             Line::from(vec![bold(t.name.clone(), FG), Span::raw("  "), state])
         }
-        None => Line::from(sp("Detalle", FG_MUTED)),
+        None => Line::from(sp("Details", FG_MUTED)),
     };
     f.render_widget(Paragraph::new(caption), parts[0]);
     f.render_widget(
@@ -449,8 +495,8 @@ fn style_conf_line(l: &str) -> Line<'static> {
     }
     if let Some((k, v)) = t.split_once('=') {
         let v = v.trim();
-        let value = if v == "(oculta)" {
-            italic("(oculta)", RED)
+        let value = if v == "(hidden)" {
+            italic("(hidden)", RED)
         } else {
             sp(v.to_string(), FG)
         };
@@ -466,49 +512,49 @@ fn style_conf_line(l: &str) -> Line<'static> {
 
 fn detail_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let Some(t) = app.selected() else {
-        return vec![Line::from(sp("Selecciona un túnel", FG_MUTED))];
+        return vec![Line::from(sp("Select a tunnel", FG_MUTED))];
     };
     let mut out: Vec<Line<'static>> = vec![Line::from("")];
 
-    // ---- estado
-    out.push(section("ESTADO", width));
+    // ---- status
+    out.push(section("STATUS", width));
     let state = match (t.busy, t.active) {
-        (Some(true), _) => sp(format!("{} Activando…", app.spinner()), YELLOW),
-        (Some(false), _) => sp(format!("{} Desactivando…", app.spinner()), YELLOW),
-        (None, true) => bold("● Activa", GREEN),
-        (None, false) => sp("○ Inactiva", FG_MUTED),
+        (Some(true), _) => sp(format!("{} Enabling…", app.spinner()), YELLOW),
+        (Some(false), _) => sp(format!("{} Disabling…", app.spinner()), YELLOW),
+        (None, true) => bold("● Active", GREEN),
+        (None, false) => sp("○ Inactive", FG_MUTED),
     };
-    out.push(kv(2, "Estado", vec![state]));
+    out.push(kv(2, "Status", vec![state]));
     if !t.address.is_empty() {
-        out.push(kv(2, "Dirección", vec![sp(t.address.clone(), FG)]));
+        out.push(kv(2, "Address", vec![sp(t.address.clone(), FG)]));
     }
     if t.active {
         if !t.listen_port.is_empty() && t.listen_port != "0" {
-            out.push(kv(2, "Puerto", vec![sp(t.listen_port.clone(), FG)]));
+            out.push(kv(2, "Port", vec![sp(t.listen_port.clone(), FG)]));
         }
         if !t.public_key.is_empty() {
-            out.push(kv(2, "Clave pública", vec![sp(short_key(&t.public_key), FG)]));
+            out.push(kv(2, "Public key", vec![sp(short_key(&t.public_key), FG)]));
         }
     } else if !t.endpoint.is_empty() {
         out.push(kv(2, "Endpoint", vec![sp(t.endpoint.clone(), FG)]));
     }
 
-    // ---- tráfico con gráfica
+    // ---- traffic graph
     if t.active {
         let (rr, tr) = app.rates.get(&t.name).copied().unwrap_or((0.0, 0.0));
         let hist = app.history.get(&t.name);
         let down: Vec<f64> = hist.map(|h| h.iter().map(|s| s.0).collect()).unwrap_or_default();
         let up: Vec<f64> = hist.map(|h| h.iter().map(|s| s.1).collect()).unwrap_or_default();
 
-        // La gráfica ocupa lo que sobra de la fila; si no cabe, se omite.
+        // The graph uses the remaining row width; omit it if it does not fit.
         let spark_w = (width as usize).saturating_sub(37).min(24);
         let spark_w = if spark_w >= 8 { spark_w } else { 0 };
 
         out.push(Line::from(""));
-        out.push(section("TRÁFICO", width));
+        out.push(section("TRAFFIC", width));
         for (arrow, label, color, total, rate, series) in [
-            ("↓", "Descarga", DOWN, t.rx(), rr, &down),
-            ("↑", "Subida", UP, t.tx(), tr, &up),
+            ("↓", "Download", DOWN, t.rx(), rr, &down),
+            ("↑", "Upload", UP, t.tx(), tr, &up),
         ] {
             out.push(Line::from(vec![
                 sp("  ", FG),
@@ -524,7 +570,7 @@ fn detail_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         for (i, p) in t.peers.iter().enumerate() {
             out.push(Line::from(""));
             out.push(section(&format!("PEER {}", i + 1), width));
-            out.push(kv(2, "Clave", vec![sp(short_key(&p.public_key), FG)]));
+            out.push(kv(2, "Key", vec![sp(short_key(&p.public_key), FG)]));
             if p.endpoint != "(none)" {
                 out.push(kv(2, "Endpoint", vec![sp(p.endpoint.clone(), FG)]));
             }
@@ -537,7 +583,7 @@ fn detail_lines(app: &App, width: u16) -> Vec<Line<'static>> {
             out.push(kv(2, "Handshake", vec![sp(ago, col)]));
             out.push(kv(
                 2,
-                "Transferido",
+                "Transferred",
                 vec![
                     sp("↓ ", DOWN),
                     sp(fmt_bytes(p.rx), FG),
@@ -546,122 +592,27 @@ fn detail_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 ],
             ));
             if p.keepalive != "off" {
-                out.push(kv(2, "Keepalive", vec![sp(format!("cada {} s", p.keepalive), FG)]));
+                out.push(kv(2, "Keepalive", vec![sp(format!("every {} s", p.keepalive), FG)]));
             }
         }
     } else if t.busy.is_none() {
         out.push(Line::from(""));
-        out.push(Line::from(italic("  Pulsa ⏎ para activar este túnel", FG_MUTED)));
+        out.push(Line::from(italic("  Press ⏎ to enable this tunnel", FG_MUTED)));
     }
 
-    // ---- configuración
+    // ---- configuration
     out.push(Line::from(""));
-    out.push(section("CONFIGURACIÓN", width));
+    out.push(section("CONFIGURATION", width));
     for l in t.conf.lines() {
         out.push(style_conf_line(l));
     }
     out
 }
 
-// ----------------------------------------------------------- búsqueda
+// ----------------------------------------------------------- search
 
-/// Filas de resultados que se ven a la vez (la lista se desplaza).
-const FINDER_ROWS: u16 = 14;
-
-fn popup_block(title: &str) -> Block<'_> {
-    Block::new()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(BORDER))
-        .style(Style::new().bg(BG))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-}
-
-/// Buscador de túneles, con el mismo aspecto que el "Find file" de runetui: línea de
-/// entrada, divisor con el contador y resultados con las letras coincidentes resaltadas.
-fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
-    if area.width < 30 || area.height < 8 {
-        return;
-    }
-    let hits = app.finder.hits(&app.tunnels);
-    let selected = app.finder.selected.min(hits.len().saturating_sub(1));
-    app.finder.selected = selected;
-
-    let width = area.width.saturating_sub(6).clamp(30, 90);
-    let rows = FINDER_ROWS.min(area.height.saturating_sub(6)).max(1);
-    let rect = Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(rows + 4) / 2,
-        width,
-        rows + 4,
-    );
-    let inner_width = width.saturating_sub(2) as usize;
-    let offset = selected.saturating_sub(rows as usize - 1);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Entrada.
-    let mut input = vec![
-        bold(" > ", ACCENT),
-        bold(app.finder.query.clone(), FG),
-        sp("▏", ACCENT),
-    ];
-    if app.finder.query.is_empty() {
-        input.push(sp(" escribe para buscar un túnel", FG_MUTED));
-    }
-    lines.push(Line::from(input));
-
-    // Divisor con el contador.
-    let status = format!(" {} / {} ", hits.len(), app.tunnels.len());
-    let dashes = inner_width.saturating_sub(status.chars().count() + 1);
-    lines.push(Line::from(vec![
-        sp("─".repeat(dashes), BORDER),
-        sp(status, FG_MUTED),
-        sp("─", BORDER),
-    ]));
-
-    // Resultados.
-    if hits.is_empty() {
-        let text = if app.tunnels.is_empty() {
-            "  no hay túneles"
-        } else {
-            "  sin resultados"
-        };
-        lines.push(Line::from(sp(text, FG_MUTED)));
-    }
-    for (index, hit) in hits.iter().enumerate().skip(offset).take(rows as usize) {
-        let tunnel = &app.tunnels[hit.index];
-        let is_selected = index == selected;
-        let mut spans = vec![
-            sp("▍ ", if is_selected { ACCENT } else { BG }),
-            if tunnel.active {
-                sp("● ", GREEN)
-            } else {
-                sp("○ ", FG_MUTED)
-            },
-        ];
-        spans.extend(name_spans(&tunnel.name, &hit.positions, is_selected));
-        let mut line = Line::from(spans);
-        if is_selected {
-            line = line.style(Style::new().bg(BG_SEL));
-        }
-        lines.push(line);
-    }
-
-    let hint = Line::from(sp(" ↑/↓ mover · Enter ir · Esc cerrar ", FG_MUTED));
-    f.render_widget(Clear, rect);
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(popup_block("Buscar túnel").title_bottom(hint))
-            .style(Style::new().bg(BG).fg(FG)),
-        rect,
-    );
-}
-
-/// El nombre con las letras que coincidieron con la búsqueda resaltadas.
-fn name_spans(name: &str, positions: &[usize], selected: bool) -> Vec<Span<'static>> {
+/// The name with letters matching the query highlighted.
+fn name_spans(name: &str, positions: &[usize], base: Style) -> Vec<Span<'static>> {
     name.chars()
         .enumerate()
         .map(|(i, c)| {
@@ -669,10 +620,8 @@ fn name_spans(name: &str, positions: &[usize], selected: bool) -> Vec<Span<'stat
                 Style::new()
                     .fg(YELLOW)
                     .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-            } else if selected {
-                Style::new().fg(FG).add_modifier(Modifier::BOLD)
             } else {
-                Style::new().fg(FG)
+                base
             };
             Span::styled(c.to_string(), style)
         })
